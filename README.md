@@ -1,23 +1,24 @@
-# ESP32 + WishioT 20 kg HX711 thrust stand
+# ESP32 dual-load-cell HX711 thrust stand
 
-This project reads a 20 kg load cell through an HX711, streams every sample from an ESP32, saves it to CSV on the PC, and plots thrust in pounds-force (`lbf`) in real time. The CSV also retains kilogram-force and newton values for engineering reference. `1 lbf = 4.448221615 N`.
+This project reads two 20 kg load cells through two HX711 modules, streams both readings and their summed thrust from one ESP32 over USB or Wi-Fi, saves the data to CSV, and plots pounds-force (`lbf`) in real time. `1 lbf = 4.448221615 N`.
 
 ## Confirmed hardware parameters
 
 - Connected ESP32 USB/UART: Silicon Labs CP210x on **COM7**
-- HX711: 24-bit ADC, channel A gain 128
+- Two HX711 modules: 24-bit ADC, channel A gain 128
 - HX711 supply range: 2.6–5.5 V; this setup uses **3.3 V** for ESP32-safe logic
 - HX711 output: normally 10 samples/s; 80 samples/s only if the board's RATE jumper/pin is configured for it
-- Load-cell capacity: 20 kg, approximately 44.09 lbf maximum static force
+- Load-cell capacity: 20 kg (44.09 lbf) per cell; neither cell may exceed its individual rating
 - Serial link: 115200 baud
+- Wireless link: ESP32 access point `ThrustStand`, TCP port `3333`
 
 Do not exceed the load cell's rated load. Rocket/motor thrust can produce shock and off-axis loads well above the steady reading, so use a rigid mount, a physical shield, remote operation, and an appropriate safety factor.
 
 ## Wiring
 
-### Load cell to HX711
+### Each load cell to its own HX711
 
-For the common WishioT four-wire cell:
+Use the same wiring for each common WishioT four-wire cell:
 
 | Load-cell wire | HX711 |
 |---|---|
@@ -28,16 +29,20 @@ For the common WishioT four-wire cell:
 
 If applied force reads negative, that is not dangerous or a calibration failure: the firmware learns the sign during calibration. Wire colors can vary, so use the markings supplied with your exact cell if they differ.
 
-### HX711 to ESP32
+### Both HX711 modules to the ESP32
 
-| HX711 | ESP32 |
-|---|---|
-| VCC | 3V3 |
-| GND | GND |
-| DT / DOUT | GPIO 4 |
-| SCK / CLK | GPIO 5 |
+| Module | HX711 pin | ESP32 |
+|---|---|---|
+| HX711 1 | VCC | 3V3 |
+| HX711 1 | GND | GND |
+| HX711 1 | DT / DOUT | GPIO 4 |
+| HX711 1 | SCK / CLK | GPIO 5 |
+| HX711 2 | VCC | 3V3 |
+| HX711 2 | GND | GND |
+| HX711 2 | DT / DOUT | GPIO 18 |
+| HX711 2 | SCK / CLK | GPIO 19 |
 
-To use different pins, edit `HX_DOUT_PIN` and `HX_SCK_PIN` near the top of the sketch.
+All grounds must be common. To use different pins, edit the two entries in the `cells` array near the top of the sketch.
 
 ## 1. Upload the ESP32 firmware
 
@@ -45,10 +50,22 @@ Open `firmware/thrust_stand_esp32/thrust_stand_esp32.ino` in Arduino IDE.
 
 1. Install Espressif's **esp32** board package in Boards Manager.
 2. Select your exact ESP32 board (for a common DevKit, use **ESP32 Dev Module**).
-3. Select **COM7**.
-4. Upload the sketch.
+3. Leave `DEVICE_NUMBER = 1`, select the first ESP32's port, and upload it. This ESP creates the Wi-Fi network at `192.168.4.1`.
+4. For an optional second ESP32, change the constant to `DEVICE_NUMBER = 2`, select that board's port, and upload again. ESP 2 joins ESP 1's network at `192.168.4.2`.
 
 The firmware contains its own HX711 reader, so no HX711 Arduino library is required.
+
+ESP 1 provides the shared network:
+
+| Setting | Value |
+|---|---|
+| Wi-Fi name | `ThrustStand` |
+| Password | `thrust20kg` |
+| ESP 1 address | `192.168.4.1` |
+| ESP 2 address | `192.168.4.2` |
+| TCP port | `3333` |
+
+Change `WIFI_SSID` and `WIFI_PASSWORD` near the top of the sketch if desired. The password must contain at least eight characters.
 
 ## 2. Install and run the PC logger
 
@@ -73,6 +90,26 @@ python .\logger\realtime_logger.py --port COM7
 
 CSV files are written into `logs` with timestamps. Closing the graph flushes and closes the file cleanly.
 
+### Run wirelessly
+
+1. Power ESP 1 first, then ESP 2 if used. Each can use a USB power bank or another stable 5 V USB supply.
+2. On the plotting computer, connect Wi-Fi to **ThrustStand** using password **thrust20kg**. Windows may report “No internet”; remain connected because this is a private instrument network.
+3. Start the wireless logger:
+
+```powershell
+.\run_logger.ps1 -Wifi
+```
+
+Or launch it directly:
+
+```powershell
+python .\logger\realtime_logger.py --wifi
+```
+
+The logger initially connects to ESP 1. To add ESP 2, leave **Add host** set to `192.168.4.2` and click **+ Add ESP**. Use **Target ESP** to choose which board receives zero, calibration, and invert commands. The graph shows raw and filtered total thrust for each connected ESP, while the CSV retains the two individual load-cell readings from every board. Recording and PNG export include both ESPs on the same computer-time axis.
+
+The plotter supports one or two ESPs. Each ESP still accepts only one network logger connection, and USB serial remains available for diagnostics.
+
 ### Record and save a complete plot image
 
 1. Click **Start recording** immediately before a test. This clears the previous image capture and begins recording every plotted sample.
@@ -81,19 +118,20 @@ CSV files are written into `logs` with timestamps. Closing the graph flushes and
 
 ## 3. Tare and calibrate
 
-Calibration is required before the graph can show pounds-force.
+Both load cells must be calibrated independently before the graph can show accurate total thrust.
 
 1. Leave the motor and all mounting hardware installed. Turn the motor off and make sure nothing is pushing or pulling on the rig.
-2. Click **Zero assembled rig** and keep it still for about 2 seconds at 10 SPS. This removes motor weight and mounting preload without disassembly.
-3. Apply a precisely known force in the same direction as thrust. A luggage/fish scale can be used to pull the rig inline.
-4. Enter that applied force in pounds-force (for example, a 2 lb pull is `2.000 lbf`) and click **Calibrate force** while holding the force steady.
-5. Release the force. The reading should return close to zero. If real thrust is displayed negative, click **Invert direction** once; the choice is saved.
+2. Select the board in **Target ESP**, click **Zero target ESP**, and keep its complete rig still. This zeros both cells on that ESP.
+3. Apply a precisely known force directly over cell 1 so the calibration load is carried by that sensor. Enter the force in pounds-force and click **Calibrate cell 1**.
+4. Move the same known force directly over cell 2 and click **Calibrate cell 2**.
+5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, click **Invert target** once; both saved calibration signs on that ESP are reversed.
+6. If a second ESP is connected, select target `2` and repeat the calibration for its two sensors.
 
-The ESP32 stores zero, calibration, and direction in nonvolatile memory. Before later tests, leave the complete rig installed and click **Zero assembled rig** after warm-up. Recalibration is only needed when mounting geometry, wiring, excitation voltage, or the load cell changes.
+The ESP32 stores separate zero and calibration values for both sensors in nonvolatile memory. Before later tests, leave the complete rig installed and click **Zero assembled rig** after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
 
 ## Measurement notes
 
-- The pale trace is each converted reading; the red trace is an exponential moving average for easier viewing. The CSV retains both.
+- Each ESP gets its own color. A faint line is its raw total and a solid line is its filtered total. The CSV retains the ESP identity, both raw ADC counts, both calibrated cell forces, and the total.
 - The default 10 SPS mode is good for static measurements but may miss fast thrust peaks. If the HX711 module exposes a RATE pad/jumper, set RATE high for 80 SPS and restart. Many boards require a solder-jumper modification—verify the board markings first.
 - Keep load-cell leads short, route them away from motor/igniter wiring, and use a rigid axial mount. USB power noise, cable strain, vibration, and temperature drift all affect readings.
 - Run a test with a known load before any live motor test, and compare the recorded peak and steady value against that known load.

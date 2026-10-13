@@ -1,5 +1,8 @@
 param(
-    [string]$Port = "COM7"
+    [string]$Port = "COM7",
+    [switch]$Wifi,
+    [string]$WifiHost = "192.168.4.1",
+    [int]$TcpPort = 3333
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,4 +29,8 @@ if (-not (Test-Path $Python)) {
     & $Python -m pip install -r (Join-Path $Project "logger\requirements.txt")
 }
 
-& $Python (Join-Path $Project "logger\realtime_logger.py") --port $Port
+if ($Wifi) {
+    & $Python (Join-Path $Project "logger\realtime_logger.py") --wifi --host $WifiHost --tcp-port $TcpPort
+} else {
+    & $Python (Join-Path $Project "logger\realtime_logger.py") --port $Port
+}
