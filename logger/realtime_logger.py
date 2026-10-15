@@ -72,7 +72,7 @@ class SourceState:
     color: str
     raw_lines: tuple[Any, Any]
     filtered_lines: tuple[Any, Any]
-    times: deque[float] = field(default_factory=deque)
+    cell_times: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
     cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
     filtered_cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
     filter_state: list[float] = field(default_factory=lambda: [math.nan, math.nan])
@@ -81,7 +81,7 @@ class SourceState:
     latest_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
     latest_filtered_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
     latest_cell_times: list[float] = field(default_factory=lambda: [0.0, 0.0])
-    record_times: list[float] = field(default_factory=list)
+    record_cell_times: list[list[float]] = field(default_factory=lambda: [[], []])
     record_cells: list[list[float]] = field(default_factory=lambda: [[], []])
     record_filtered_cells: list[list[float]] = field(default_factory=lambda: [[], []])
 
@@ -201,7 +201,7 @@ def main() -> int:
                             bottom=0.30, hspace=0.58, wspace=0.22,
                             height_ratios=(1.0, 1.0, 1.15))
     cell_axes = [
-        [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])],
+        [fig.add_subplot(grid[0:2, 0]), fig.add_subplot(grid[0:2, 1])],
         [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])],
     ]
     total_ax = fig.add_subplot(grid[2, :])
@@ -265,6 +265,10 @@ def main() -> int:
         number = len(sources) + 1
         label = f"ESP {number}"
         color = SOURCE_COLORS[number - 1]
+        if number == 2:
+            for cell_index in range(2):
+                cell_axes[0][cell_index].set_subplotspec(grid[0, cell_index])
+            fig.canvas.draw_idle()
         raw_lines = []
         filtered_lines = []
         for cell_index, cell_ax in enumerate(cell_axes[number - 1]):
@@ -354,8 +358,8 @@ def main() -> int:
         total_values.clear()
         total_filtered.clear()
         for source in sources:
-            source.times.clear()
             for cell_index in range(2):
+                source.cell_times[cell_index].clear()
                 source.cells[cell_index].clear()
                 source.filtered_cells[cell_index].clear()
                 source.latest_cells[cell_index] = math.nan
@@ -400,8 +404,8 @@ def main() -> int:
         record_total_values.clear()
         record_total_filtered.clear()
         for source in sources:
-            source.record_times.clear()
             for cell_index in range(2):
+                source.record_cell_times[cell_index].clear()
                 source.record_cells[cell_index].clear()
                 source.record_filtered_cells[cell_index].clear()
         record_started_mono = time.monotonic()
@@ -431,10 +435,11 @@ def main() -> int:
             for cell_index in range(2):
                 saved_ax = saved_axes[axis_index]
                 axis_index += 1
-                saved_ax.plot(source.record_times, source.record_cells[cell_index],
+                saved_ax.plot(source.record_cell_times[cell_index],
+                              source.record_cells[cell_index],
                               color=source.color, linewidth=0.8, alpha=0.35,
                               label="Raw")
-                saved_ax.plot(source.record_times,
+                saved_ax.plot(source.record_cell_times[cell_index],
                               source.record_filtered_cells[cell_index],
                               color=source.color, linewidth=2.0, label="Filtered")
                 saved_ax.axhline(0, color="black", linewidth=0.7)
@@ -491,7 +496,6 @@ def main() -> int:
 
             _, source, host_mono, sample = item
             t = host_mono - plot_started
-            source.times.append(t)
             force_values = [float(sample["cell1_lbf"]),
                             float(sample["cell2_lbf"])]
             raw_counts = [float(sample["raw1"]), float(sample["raw2"])]
@@ -538,15 +542,21 @@ def main() -> int:
                     source.latest_cells[cell_index] = force_value
                     source.latest_filtered_cells[cell_index] = filtered_force
                     source.latest_cell_times[cell_index] = host_mono
-                source.cells[cell_index].append(display_value)
-                source.filtered_cells[cell_index].append(filtered_values[cell_index])
+                if math.isfinite(display_value):
+                    source.cell_times[cell_index].append(t)
+                    source.cells[cell_index].append(display_value)
+                    source.filtered_cells[cell_index].append(
+                        filtered_values[cell_index])
 
             if recording:
-                source.record_times.append(host_mono - record_started_mono)
                 for cell_index in range(2):
-                    source.record_cells[cell_index].append(cell_values[cell_index])
-                    source.record_filtered_cells[cell_index].append(
-                        filtered_values[cell_index])
+                    if math.isfinite(cell_values[cell_index]):
+                        source.record_cell_times[cell_index].append(
+                            host_mono - record_started_mono)
+                        source.record_cells[cell_index].append(
+                            cell_values[cell_index])
+                        source.record_filtered_cells[cell_index].append(
+                            filtered_values[cell_index])
 
             active_raw: list[float] = []
             active_filtered: list[float] = []
@@ -572,9 +582,10 @@ def main() -> int:
             if math.isfinite(combined_filtered):
                 peak = max(peak, combined_filtered)
 
-            while source.times and t - source.times[0] > args.window:
-                source.times.popleft()
-                for cell_index in range(2):
+            for cell_index in range(2):
+                while (source.cell_times[cell_index] and
+                       t - source.cell_times[cell_index][0] > args.window):
+                    source.cell_times[cell_index].popleft()
                     source.cells[cell_index].popleft()
                     source.filtered_cells[cell_index].popleft()
             while total_times and t - total_times[0] > args.window:
@@ -592,8 +603,9 @@ def main() -> int:
             for cell_index in range(2):
                 raw_line = source.raw_lines[cell_index]
                 filtered_line = source.filtered_lines[cell_index]
-                raw_line.set_data(source.times, source.cells[cell_index])
-                filtered_line.set_data(source.times,
+                raw_line.set_data(source.cell_times[cell_index],
+                                  source.cells[cell_index])
+                filtered_line.set_data(source.cell_times[cell_index],
                                        source.filtered_cells[cell_index])
                 artists.extend((raw_line, filtered_line))
                 finite_cell = [
@@ -607,8 +619,8 @@ def main() -> int:
                     pad = max(0.5, (high - low) * 0.12)
                     cell_axes[source.number - 1][cell_index].set_ylim(
                         low - pad, high + pad)
-            if source.times:
-                latest = max(latest, source.times[-1])
+                if source.cell_times[cell_index]:
+                    latest = max(latest, source.cell_times[cell_index][-1])
 
         total_raw_line.set_data(total_times, total_values)
         total_filtered_line.set_data(total_times, total_filtered)

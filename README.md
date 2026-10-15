@@ -108,7 +108,7 @@ python .\logger\realtime_logger.py --wifi
 
 The logger initially connects to ESP 1. To add ESP 2, leave **Add host** set to `192.168.4.2` and click **+ Add ESP**. Use **Target ESP** to choose which board receives zero, calibration, and invert commands. Each connected ESP gets two separate load-cell plots, and a final plot shows combined thrust from every available load cell. Recording and PNG export preserve the same per-cell and combined layout.
 
-The plotter supports one or two ESPs. Each ESP still accepts only one network logger connection, and USB serial remains available for diagnostics.
+The plotter supports one or two ESPs. With only ESP 1 connected, its two sensor plots expand to fill the upper display area. Adding ESP 2 automatically changes to a four-sensor grid. Each ESP still accepts only one network logger connection, and USB serial remains available for diagnostics.
 
 ### Record and save a complete plot image
 
