@@ -33,6 +33,8 @@ DEFAULT_TCP_PORT = 3333
 STANDARD_GRAVITY = 9.80665
 NEWTONS_PER_LBF = 4.4482216152605
 SOURCE_COLORS = ("#1f77b4", "#ff7f0e")
+EMA_ALPHA = 0.30
+TOTAL_FRESHNESS_SECONDS = 1.0
 
 
 class SocketTransport:
@@ -68,14 +70,20 @@ class SourceState:
     endpoint: str
     transport: Any
     color: str
-    raw_line: Any
-    filtered_line: Any
+    raw_lines: tuple[Any, Any]
+    filtered_lines: tuple[Any, Any]
     times: deque[float] = field(default_factory=deque)
-    totals: deque[float] = field(default_factory=deque)
-    filtered: deque[float] = field(default_factory=deque)
+    cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
+    filtered_cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
+    filter_state: list[float] = field(default_factory=lambda: [math.nan, math.nan])
+    force_filter_state: list[float] = field(default_factory=lambda: [math.nan, math.nan])
+    cell_units: list[str | None] = field(default_factory=lambda: [None, None])
+    latest_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
+    latest_filtered_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
+    latest_cell_times: list[float] = field(default_factory=lambda: [0.0, 0.0])
     record_times: list[float] = field(default_factory=list)
-    record_totals: list[float] = field(default_factory=list)
-    record_filtered: list[float] = field(default_factory=list)
+    record_cells: list[list[float]] = field(default_factory=lambda: [[], []])
+    record_filtered_cells: list[list[float]] = field(default_factory=lambda: [[], []])
 
 
 def choose_port(requested: str | None) -> str:
@@ -181,14 +189,41 @@ def main() -> int:
     record_started_at: datetime | None = None
     peak = -math.inf
 
-    fig, ax = plt.subplots(figsize=(12, 7))
-    plt.subplots_adjust(bottom=0.31)
-    ax.axhline(0, color="black", linewidth=0.7)
-    ax.set_title("ESP32 Multi-Stand Thrust Plot")
-    ax.set_xlabel("Computer time (s)")
-    ax.set_ylabel("Total thrust (lbf)")
-    ax.grid(True, alpha=0.25)
-    peak_text = ax.text(0.99, 0.98, "Peak: -- lbf", transform=ax.transAxes,
+    total_times: deque[float] = deque()
+    total_values: deque[float] = deque()
+    total_filtered: deque[float] = deque()
+    record_total_times: list[float] = []
+    record_total_values: list[float] = []
+    record_total_filtered: list[float] = []
+
+    fig = plt.figure(figsize=(13, 9))
+    grid = fig.add_gridspec(3, 2, left=0.07, right=0.98, top=0.94,
+                            bottom=0.30, hspace=0.58, wspace=0.22,
+                            height_ratios=(1.0, 1.0, 1.15))
+    cell_axes = [
+        [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])],
+        [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])],
+    ]
+    total_ax = fig.add_subplot(grid[2, :])
+    for esp_index, axes in enumerate(cell_axes):
+        for cell_index, cell_ax in enumerate(axes):
+            cell_ax.axhline(0, color="black", linewidth=0.7)
+            cell_ax.set_title(f"ESP {esp_index + 1} — Load cell {cell_index + 1}")
+            cell_ax.set_ylabel("Thrust (lbf)")
+            cell_ax.grid(True, alpha=0.25)
+            if esp_index == 1:
+                cell_ax.set_visible(False)
+    total_ax.axhline(0, color="black", linewidth=0.7)
+    total_ax.set_title("Total thrust — all available load cells")
+    total_ax.set_xlabel("Computer time (s)")
+    total_ax.set_ylabel("Total thrust (lbf)")
+    total_ax.grid(True, alpha=0.25)
+    total_raw_line, = total_ax.plot([], [], color="#555555", linewidth=0.9,
+                                    alpha=0.40, label="Combined raw")
+    total_filtered_line, = total_ax.plot([], [], color="#111111", linewidth=2.2,
+                                         label="Combined filtered")
+    total_ax.legend(loc="upper left")
+    peak_text = total_ax.text(0.99, 0.98, "Peak: -- lbf", transform=total_ax.transAxes,
                         ha="right", va="top", fontsize=11)
     status_text = fig.text(0.01, 0.01, f"CSV: {output}", fontsize=9)
 
@@ -230,14 +265,20 @@ def main() -> int:
         number = len(sources) + 1
         label = f"ESP {number}"
         color = SOURCE_COLORS[number - 1]
-        raw_line, = ax.plot([], [], color=color, linewidth=0.8, alpha=0.35,
-                            label=f"{label} raw")
-        filtered_line, = ax.plot([], [], color=color, linewidth=2.0,
-                                 label=f"{label} filtered")
+        raw_lines = []
+        filtered_lines = []
+        for cell_index, cell_ax in enumerate(cell_axes[number - 1]):
+            cell_ax.set_visible(True)
+            raw_line, = cell_ax.plot([], [], color=color, linewidth=0.8, alpha=0.35,
+                                     label="Raw")
+            filtered_line, = cell_ax.plot([], [], color=color, linewidth=2.0,
+                                          label="Filtered")
+            cell_ax.legend(loc="upper left")
+            raw_lines.append(raw_line)
+            filtered_lines.append(filtered_line)
         source = SourceState(number, label, endpoint, transport, color,
-                             raw_line, filtered_line)
+                             tuple(raw_lines), tuple(filtered_lines))
         sources.append(source)
-        ax.legend(loc="upper left", ncols=2)
         thread = threading.Thread(target=read_source, args=(source,), daemon=True)
         reader_threads.append(thread)
         thread.start()
@@ -309,10 +350,21 @@ def main() -> int:
         nonlocal plot_started, peak
         plot_started = time.monotonic()
         peak = -math.inf
+        total_times.clear()
+        total_values.clear()
+        total_filtered.clear()
         for source in sources:
             source.times.clear()
-            source.totals.clear()
-            source.filtered.clear()
+            for cell_index in range(2):
+                source.cells[cell_index].clear()
+                source.filtered_cells[cell_index].clear()
+                source.latest_cells[cell_index] = math.nan
+                source.latest_filtered_cells[cell_index] = math.nan
+                source.latest_cell_times[cell_index] = 0.0
+                source.filter_state[cell_index] = math.nan
+                source.force_filter_state[cell_index] = math.nan
+                source.cell_units[cell_index] = None
+                cell_axes[source.number - 1][cell_index].set_ylabel("Thrust (lbf)")
 
     clear_button.on_clicked(clear_plot)
 
@@ -344,10 +396,14 @@ def main() -> int:
 
     def start_recording(_event=None) -> None:
         nonlocal recording, record_started_mono, record_started_at
+        record_total_times.clear()
+        record_total_values.clear()
+        record_total_filtered.clear()
         for source in sources:
             source.record_times.clear()
-            source.record_totals.clear()
-            source.record_filtered.clear()
+            for cell_index in range(2):
+                source.record_cells[cell_index].clear()
+                source.record_filtered_cells[cell_index].clear()
         record_started_mono = time.monotonic()
         record_started_at = datetime.now()
         recording = True
@@ -360,35 +416,50 @@ def main() -> int:
         recording = False
         record_button.color = "0.85"
         record_ax.set_facecolor("0.85")
-        if not any(source.record_times for source in sources):
+        if not record_total_times:
             status_text.set_text("No samples were captured; start recording first")
             return
 
         stamp = (record_started_at or datetime.now()).strftime("%Y%m%d_%H%M%S")
         image_path = output.parent / f"thrust_plot_{stamp}.png"
-        saved_fig = Figure(figsize=(12, 7), dpi=150)
+        plot_count = len(sources) * 2 + 1
+        saved_fig = Figure(figsize=(12, 3.2 * plot_count), dpi=150)
         FigureCanvasAgg(saved_fig)
-        saved_ax = saved_fig.add_subplot(1, 1, 1)
-        recorded_values: list[float] = []
+        saved_axes = saved_fig.subplots(plot_count, 1, squeeze=False).ravel()
+        axis_index = 0
         for source in sources:
-            if not source.record_times:
-                continue
-            saved_ax.plot(source.record_times, source.record_totals,
-                          color=source.color, linewidth=0.8, alpha=0.35,
-                          label=f"{source.label} raw")
-            saved_ax.plot(source.record_times, source.record_filtered,
-                          color=source.color, linewidth=2.0,
-                          label=f"{source.label} filtered")
-            recorded_values.extend(v for v in source.record_filtered if math.isfinite(v))
-        saved_ax.axhline(0, color="black", linewidth=0.7)
-        saved_ax.set_title("Recorded Multi-ESP Thrust Run")
-        saved_ax.set_xlabel("Computer time (s)")
-        saved_ax.set_ylabel("Total thrust per ESP (lbf)")
-        saved_ax.grid(True, alpha=0.25)
-        saved_ax.legend(loc="upper left", ncols=2)
+            for cell_index in range(2):
+                saved_ax = saved_axes[axis_index]
+                axis_index += 1
+                saved_ax.plot(source.record_times, source.record_cells[cell_index],
+                              color=source.color, linewidth=0.8, alpha=0.35,
+                              label="Raw")
+                saved_ax.plot(source.record_times,
+                              source.record_filtered_cells[cell_index],
+                              color=source.color, linewidth=2.0, label="Filtered")
+                saved_ax.axhline(0, color="black", linewidth=0.7)
+                saved_ax.set_title(f"{source.label} — Load cell {cell_index + 1}")
+                saved_ax.set_ylabel(source.cell_units[cell_index] or "Thrust (lbf)")
+                saved_ax.grid(True, alpha=0.25)
+                saved_ax.legend(loc="upper left")
+        saved_total_ax = saved_axes[-1]
+        saved_total_ax.plot(record_total_times, record_total_values,
+                            color="#555555", linewidth=0.9, alpha=0.40,
+                            label="Combined raw")
+        saved_total_ax.plot(record_total_times, record_total_filtered,
+                            color="#111111", linewidth=2.2,
+                            label="Combined filtered")
+        saved_total_ax.axhline(0, color="black", linewidth=0.7)
+        saved_total_ax.set_title("Total thrust — all available load cells")
+        saved_total_ax.set_xlabel("Computer time (s)")
+        saved_total_ax.set_ylabel("Total thrust (lbf)")
+        saved_total_ax.grid(True, alpha=0.25)
+        saved_total_ax.legend(loc="upper left")
+        recorded_values = [v for v in record_total_filtered if math.isfinite(v)]
         if recorded_values:
-            saved_ax.text(0.99, 0.98, f"Peak: {max(recorded_values):.3f} lbf",
-                          transform=saved_ax.transAxes, ha="right", va="top")
+            saved_total_ax.text(0.99, 0.98, f"Peak: {max(recorded_values):.3f} lbf",
+                                transform=saved_total_ax.transAxes,
+                                ha="right", va="top")
         saved_fig.tight_layout()
         saved_fig.savefig(image_path, bbox_inches="tight")
         status_text.set_text(f"Saved plot for {len(sources)} ESP(s): {image_path}")
@@ -415,50 +486,149 @@ def main() -> int:
             if item[0] == "new_source":
                 connecting["active"] = False
                 register_source(item[1], item[2])
-                target_box.set_val(str(len(sources)))
                 newest_status = f"ESP {len(sources)} connected: {item[2]}"
                 continue
 
             _, source, host_mono, sample = item
             t = host_mono - plot_started
-            total_lbf = float(sample["total_lbf"])
-            filtered_lbf = float(sample["filtered_lbf"])
             source.times.append(t)
-            source.totals.append(total_lbf)
-            source.filtered.append(filtered_lbf)
+            force_values = [float(sample["cell1_lbf"]),
+                            float(sample["cell2_lbf"])]
+            raw_counts = [float(sample["raw1"]), float(sample["raw2"])]
+            cell_values = [math.nan, math.nan]
+            filtered_values = [math.nan, math.nan]
+            for cell_index, force_value in enumerate(force_values):
+                if source.cell_units[cell_index] is None:
+                    if math.isfinite(force_value):
+                        source.cell_units[cell_index] = "Thrust (lbf)"
+                    elif raw_counts[cell_index] != 0.0:
+                        source.cell_units[cell_index] = "ADC counts (uncalibrated)"
+                        newest_status = (f"{source.label} cell {cell_index + 1}: "
+                                         "ADC data received; calibration required for lbf")
+                    if source.cell_units[cell_index]:
+                        cell_axes[source.number - 1][cell_index].set_ylabel(
+                            source.cell_units[cell_index])
+
+                if source.cell_units[cell_index] == "Thrust (lbf)":
+                    display_value = force_value
+                elif source.cell_units[cell_index] == "ADC counts (uncalibrated)":
+                    display_value = (raw_counts[cell_index]
+                                     if raw_counts[cell_index] != 0.0 else math.nan)
+                else:
+                    display_value = math.nan
+                cell_values[cell_index] = display_value
+
+                if math.isfinite(display_value):
+                    previous = source.filter_state[cell_index]
+                    if math.isfinite(previous):
+                        filtered_value = previous + EMA_ALPHA * (display_value - previous)
+                    else:
+                        filtered_value = display_value
+                    source.filter_state[cell_index] = filtered_value
+                    filtered_values[cell_index] = filtered_value
+
+                if math.isfinite(force_value):
+                    previous_force = source.force_filter_state[cell_index]
+                    if math.isfinite(previous_force):
+                        filtered_force = (previous_force +
+                                          EMA_ALPHA * (force_value - previous_force))
+                    else:
+                        filtered_force = force_value
+                    source.force_filter_state[cell_index] = filtered_force
+                    source.latest_cells[cell_index] = force_value
+                    source.latest_filtered_cells[cell_index] = filtered_force
+                    source.latest_cell_times[cell_index] = host_mono
+                source.cells[cell_index].append(display_value)
+                source.filtered_cells[cell_index].append(filtered_values[cell_index])
+
             if recording:
                 source.record_times.append(host_mono - record_started_mono)
-                source.record_totals.append(total_lbf)
-                source.record_filtered.append(filtered_lbf)
-            if math.isfinite(filtered_lbf):
-                peak = max(peak, filtered_lbf)
+                for cell_index in range(2):
+                    source.record_cells[cell_index].append(cell_values[cell_index])
+                    source.record_filtered_cells[cell_index].append(
+                        filtered_values[cell_index])
+
+            active_raw: list[float] = []
+            active_filtered: list[float] = []
+            for active_source in sources:
+                for cell_index in range(2):
+                    fresh = (host_mono - active_source.latest_cell_times[cell_index]
+                             <= TOTAL_FRESHNESS_SECONDS)
+                    raw_value = active_source.latest_cells[cell_index]
+                    filtered_value = active_source.latest_filtered_cells[cell_index]
+                    if fresh and math.isfinite(raw_value):
+                        active_raw.append(raw_value)
+                    if fresh and math.isfinite(filtered_value):
+                        active_filtered.append(filtered_value)
+            combined_total = sum(active_raw) if active_raw else math.nan
+            combined_filtered = sum(active_filtered) if active_filtered else math.nan
+            total_times.append(t)
+            total_values.append(combined_total)
+            total_filtered.append(combined_filtered)
+            if recording:
+                record_total_times.append(host_mono - record_started_mono)
+                record_total_values.append(combined_total)
+                record_total_filtered.append(combined_filtered)
+            if math.isfinite(combined_filtered):
+                peak = max(peak, combined_filtered)
+
             while source.times and t - source.times[0] > args.window:
                 source.times.popleft()
-                source.totals.popleft()
-                source.filtered.popleft()
+                for cell_index in range(2):
+                    source.cells[cell_index].popleft()
+                    source.filtered_cells[cell_index].popleft()
+            while total_times and t - total_times[0] > args.window:
+                total_times.popleft()
+                total_values.popleft()
+                total_filtered.popleft()
 
         if newest_status:
             status_text.set_text(newest_status)
 
-        finite_y: list[float] = []
         latest = 0.0
-        artists: list[Any] = [peak_text, status_text]
+        artists: list[Any] = [peak_text, status_text,
+                              total_raw_line, total_filtered_line]
         for source in sources:
-            source.raw_line.set_data(source.times, source.totals)
-            source.filtered_line.set_data(source.times, source.filtered)
-            artists.extend((source.raw_line, source.filtered_line))
+            for cell_index in range(2):
+                raw_line = source.raw_lines[cell_index]
+                filtered_line = source.filtered_lines[cell_index]
+                raw_line.set_data(source.times, source.cells[cell_index])
+                filtered_line.set_data(source.times,
+                                       source.filtered_cells[cell_index])
+                artists.extend((raw_line, filtered_line))
+                finite_cell = [
+                    value
+                    for series in (source.cells[cell_index],
+                                   source.filtered_cells[cell_index])
+                    for value in series if math.isfinite(value)
+                ]
+                if finite_cell:
+                    low, high = min(finite_cell), max(finite_cell)
+                    pad = max(0.5, (high - low) * 0.12)
+                    cell_axes[source.number - 1][cell_index].set_ylim(
+                        low - pad, high + pad)
             if source.times:
                 latest = max(latest, source.times[-1])
-            finite_y.extend(v for v in list(source.totals) + list(source.filtered)
-                            if math.isfinite(v))
+
+        total_raw_line.set_data(total_times, total_values)
+        total_filtered_line.set_data(total_times, total_filtered)
+        if total_times:
+            latest = max(latest, total_times[-1])
+        finite_total = [value for series in (total_values, total_filtered)
+                        for value in series if math.isfinite(value)]
 
         if latest:
             right = max(args.window, latest)
-            ax.set_xlim(max(0, right - args.window), right)
-        if finite_y:
-            low, high = min(finite_y), max(finite_y)
+            left = max(0, right - args.window)
+            total_ax.set_xlim(left, right)
+            for axes in cell_axes:
+                for cell_ax in axes:
+                    if cell_ax.get_visible():
+                        cell_ax.set_xlim(left, right)
+        if finite_total:
+            low, high = min(finite_total), max(finite_total)
             pad = max(0.5, (high - low) * 0.12)
-            ax.set_ylim(low - pad, high + pad)
+            total_ax.set_ylim(low - pad, high + pad)
         peak_text.set_text(f"Peak: {peak:.3f} lbf" if math.isfinite(peak)
                            else "Peak: -- lbf")
         return tuple(artists)

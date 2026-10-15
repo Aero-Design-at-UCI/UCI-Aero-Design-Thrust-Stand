@@ -106,7 +106,7 @@ Or launch it directly:
 python .\logger\realtime_logger.py --wifi
 ```
 
-The logger initially connects to ESP 1. To add ESP 2, leave **Add host** set to `192.168.4.2` and click **+ Add ESP**. Use **Target ESP** to choose which board receives zero, calibration, and invert commands. The graph shows raw and filtered total thrust for each connected ESP, while the CSV retains the two individual load-cell readings from every board. Recording and PNG export include both ESPs on the same computer-time axis.
+The logger initially connects to ESP 1. To add ESP 2, leave **Add host** set to `192.168.4.2` and click **+ Add ESP**. Use **Target ESP** to choose which board receives zero, calibration, and invert commands. Each connected ESP gets two separate load-cell plots, and a final plot shows combined thrust from every available load cell. Recording and PNG export preserve the same per-cell and combined layout.
 
 The plotter supports one or two ESPs. Each ESP still accepts only one network logger connection, and USB serial remains available for diagnostics.
 
@@ -118,20 +118,24 @@ The plotter supports one or two ESPs. Each ESP still accepts only one network lo
 
 ## 3. Tare and calibrate
 
-Both load cells must be calibrated independently before the graph can show accurate total thrust.
+Each connected load cell must be calibrated independently before it can contribute accurate thrust data.
 
 1. Leave the motor and all mounting hardware installed. Turn the motor off and make sure nothing is pushing or pulling on the rig.
-2. Select the board in **Target ESP**, click **Zero target ESP**, and keep its complete rig still. This zeros both cells on that ESP.
+2. Select the board in **Target ESP**, click **Zero target ESP**, and keep its complete rig still. This zeros every responding cell on that ESP and skips a disconnected cell.
 3. Apply a precisely known force directly over cell 1 so the calibration load is carried by that sensor. Enter the force in pounds-force and click **Calibrate cell 1**.
 4. Move the same known force directly over cell 2 and click **Calibrate cell 2**.
-5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, click **Invert target** once; both saved calibration signs on that ESP are reversed.
+5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, click **Invert target** once; every calibrated cell on that ESP is reversed.
 6. If a second ESP is connected, select target `2` and repeat the calibration for its two sensors.
 
 The ESP32 stores separate zero and calibration values for both sensors in nonvolatile memory. Before later tests, leave the complete rig installed and click **Zero assembled rig** after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
 
 ## Measurement notes
 
-- Each ESP gets its own color. A faint line is its raw total and a solid line is its filtered total. The CSV retains the ESP identity, both raw ADC counts, both calibrated cell forces, and the total.
+- Each ESP has a separate plot for load cell 1 and load cell 2. The bottom plot sums every fresh, calibrated load cell across the connected ESPs. Faint lines are raw data and solid lines are filtered data.
+- A missing, unpowered, or uncalibrated load cell is reported as `NaN`, bypassed automatically, and excluded from the combined total. The other load cell continues sampling normally.
+- If a cell is responding but has no calibration, its individual panel switches to **ADC counts (uncalibrated)** so wiring and sensor activity remain visible. ADC counts never contribute to the pounds-force total.
+- Upgrading from the original single-cell firmware automatically migrates its saved `zero` and `scale` values to load cell 1.
+- The CSV retains the ESP identity, both raw ADC counts, both calibrated cell forces, and each ESP's available-cell total.
 - The default 10 SPS mode is good for static measurements but may miss fast thrust peaks. If the HX711 module exposes a RATE pad/jumper, set RATE high for 80 SPS and restart. Many boards require a solder-jumper modification—verify the board markings first.
 - Keep load-cell leads short, route them away from motor/igniter wiring, and use a rigid axial mount. USB power noise, cable strain, vibration, and temperature drift all affect readings.
 - Run a test with a known load before any live motor test, and compare the recorded peak and steady value against that known load.

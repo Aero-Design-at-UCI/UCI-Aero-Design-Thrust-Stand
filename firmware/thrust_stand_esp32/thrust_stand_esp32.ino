@@ -134,23 +134,25 @@ void printInfo() {
 }
 
 void tareAll() {
-  emitLine("# STATUS,Zeroing both cells: motor off, no applied thrust, keep the rig still");
-  int64_t averages[2];
-  if (!averageRaw(cells[0], ZERO_SAMPLES, averages[0])) {
-    emitLine("# ERROR,HX711 cell 1 timeout during tare");
-    return;
-  }
-  if (!averageRaw(cells[1], ZERO_SAMPLES, averages[1])) {
-    emitLine("# ERROR,HX711 cell 2 timeout during tare");
-    return;
-  }
+  emitLine("# STATUS,Zeroing available cells: motor off, no applied thrust, keep the rig still");
+  uint8_t zeroed = 0;
   for (uint8_t i = 0; i < 2; ++i) {
-    cells[i].zeroOffset = averages[i];
+    int64_t average;
+    if (!averageRaw(cells[i], ZERO_SAMPLES, average)) {
+      emitf("# STATUS,HX711 cell %u unavailable; skipped during tare", i + 1);
+      continue;
+    }
+    cells[i].zeroOffset = average;
     cells[i].filteredKgf = NAN;
     prefs.putLong64(cells[i].zeroKey, cells[i].zeroOffset);
+    ++zeroed;
   }
-  emitf("# STATUS,Tare complete,cell1_zero=%lld,cell2_zero=%lld",
-        cells[0].zeroOffset, cells[1].zeroOffset);
+  if (zeroed) {
+    emitf("# STATUS,Tare complete,zeroed_cells=%u,cell1_zero=%lld,cell2_zero=%lld",
+          zeroed, cells[0].zeroOffset, cells[1].zeroOffset);
+  } else {
+    emitLine("# ERROR,No HX711 cells responded during tare");
+  }
 }
 
 void calibrateCell(uint8_t index, double knownLbf) {
@@ -184,16 +186,16 @@ void calibrateCell(uint8_t index, double knownLbf) {
 }
 
 void invertDirection() {
-  if (!isfinite(cells[0].countsPerKg) || !isfinite(cells[1].countsPerKg)) {
-    emitLine("# ERROR,Calibrate both cells before changing direction");
-    return;
-  }
+  uint8_t inverted = 0;
   for (uint8_t i = 0; i < 2; ++i) {
+    if (!isfinite(cells[i].countsPerKg)) continue;
     cells[i].countsPerKg = -cells[i].countsPerKg;
     cells[i].filteredKgf = NAN;
     prefs.putDouble(cells[i].scaleKey, cells[i].countsPerKg);
+    ++inverted;
   }
-  emitLine("# STATUS,Both displayed force directions inverted and saved");
+  if (inverted) emitf("# STATUS,Direction inverted for %u calibrated cell(s)", inverted);
+  else emitLine("# ERROR,Calibrate at least one available cell before changing direction");
 }
 
 void handleCommand(String command) {
@@ -299,6 +301,18 @@ void setup() {
   }
 
   prefs.begin("thrust-stand", false);
+  // Migrate calibration made by the original single-cell firmware to cell 1.
+  if (!prefs.isKey(cells[0].zeroKey) && prefs.isKey("zero")) {
+    prefs.putLong64(cells[0].zeroKey, prefs.getLong64("zero", 0));
+    emitLine("# STATUS,Migrated legacy zero offset to cell 1");
+  }
+  if (!prefs.isKey(cells[0].scaleKey) && prefs.isKey("scale")) {
+    const double legacyScale = prefs.getDouble("scale", NAN);
+    if (isfinite(legacyScale) && fabs(legacyScale) >= MIN_COUNTS_PER_KG) {
+      prefs.putDouble(cells[0].scaleKey, legacyScale);
+      emitLine("# STATUS,Migrated legacy calibration factor to cell 1");
+    }
+  }
   for (uint8_t i = 0; i < 2; ++i) {
     cells[i].zeroOffset = prefs.getLong64(cells[i].zeroKey, 0);
     cells[i].countsPerKg = prefs.getDouble(cells[i].scaleKey, NAN);
@@ -308,7 +322,7 @@ void setup() {
     }
   }
 
-  emitf("# THRUST_STAND_V4_DUAL_WIFI,device=%u", DEVICE_NUMBER);
+  emitf("# THRUST_STAND_V5_DUAL_WIFI,device=%u", DEVICE_NUMBER);
   emitLine("# COLUMNS,time_ms,raw1,raw2,kgf1,kgf2,total_kgf,total_force_N,filtered_total_force_N");
   printInfo();
 
@@ -321,8 +335,9 @@ void setup() {
   for (size_t sample = 0; sample < STARTUP_DISCARD_SAMPLES; ++sample) {
     for (uint8_t i = 0; i < 2; ++i) {
       int32_t discarded;
-      if (!hxRead(cells[i], discarded)) break;
+      if (digitalRead(cells[i].doutPin) == LOW) hxRead(cells[i], discarded, 20);
     }
+    delay(10);
   }
 
   if (!cells[0].zeroOffset || !cells[1].zeroOffset) {
@@ -337,27 +352,34 @@ void loop() {
   readCommands(Serial, serialCommand);
   serviceWifiClient();
 
-  if (digitalRead(cells[0].doutPin) == LOW && digitalRead(cells[1].doutPin) == LOW) {
-    int32_t raw[2];
-    if (hxRead(cells[0], raw[0], 20) && hxRead(cells[1], raw[1], 20)) {
-      double kgf[2] = {NAN, NAN};
-      double filteredKgf[2] = {NAN, NAN};
-      for (uint8_t i = 0; i < 2; ++i) {
-        if (isfinite(cells[i].countsPerKg)) {
-          kgf[i] = static_cast<double>(static_cast<int64_t>(raw[i]) - cells[i].zeroOffset) /
-                   cells[i].countsPerKg;
-          if (!isfinite(cells[i].filteredKgf)) cells[i].filteredKgf = kgf[i];
-          else cells[i].filteredKgf += EMA_ALPHA * (kgf[i] - cells[i].filteredKgf);
-          filteredKgf[i] = cells[i].filteredKgf;
-        }
-      }
-
-      const double totalKgf = kgf[0] + kgf[1];
-      const double totalForceN = totalKgf * STANDARD_GRAVITY;
-      const double filteredTotalN = (filteredKgf[0] + filteredKgf[1]) * STANDARD_GRAVITY;
-      emitf("DATA,%lu,%ld,%ld,%.6f,%.6f,%.6f,%.6f,%.6f",
-            millis(), raw[0], raw[1], kgf[0], kgf[1], totalKgf,
-            totalForceN, filteredTotalN);
-    }
+  int32_t raw[2] = {0, 0};
+  bool received[2] = {false, false};
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (digitalRead(cells[i].doutPin) == LOW) received[i] = hxRead(cells[i], raw[i], 20);
   }
+  if (!received[0] && !received[1]) return;
+
+  double kgf[2] = {NAN, NAN};
+  double filteredKgf[2] = {NAN, NAN};
+  double totalKgf = 0.0;
+  double filteredTotalKgf = 0.0;
+  uint8_t validCells = 0;
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (!received[i] || !isfinite(cells[i].countsPerKg)) continue;
+    kgf[i] = static_cast<double>(static_cast<int64_t>(raw[i]) - cells[i].zeroOffset) /
+             cells[i].countsPerKg;
+    if (!isfinite(cells[i].filteredKgf)) cells[i].filteredKgf = kgf[i];
+    else cells[i].filteredKgf += EMA_ALPHA * (kgf[i] - cells[i].filteredKgf);
+    filteredKgf[i] = cells[i].filteredKgf;
+    totalKgf += kgf[i];
+    filteredTotalKgf += filteredKgf[i];
+    ++validCells;
+  }
+
+  const double reportedTotalKgf = validCells ? totalKgf : NAN;
+  const double totalForceN = validCells ? totalKgf * STANDARD_GRAVITY : NAN;
+  const double filteredTotalN = validCells ? filteredTotalKgf * STANDARD_GRAVITY : NAN;
+  emitf("DATA,%lu,%ld,%ld,%.6f,%.6f,%.6f,%.6f,%.6f",
+        millis(), raw[0], raw[1], kgf[0], kgf[1], reportedTotalKgf,
+        totalForceN, filteredTotalN);
 }
