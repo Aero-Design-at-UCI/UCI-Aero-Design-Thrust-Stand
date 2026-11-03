@@ -11,9 +11,9 @@ from typing import Iterable
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from realtime_logger import ThrustStandSession
+from realtime_logger import CELL_COUNT, ThrustStandSession
 
-COLORS = ("#1f77b4", "#ff7f0e")
+CELL_COLORS = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728")
 
 
 def _finite_max(values: Iterable[float]) -> float | None:
@@ -31,42 +31,37 @@ def _style(axis, title: str, ylabel: str) -> None:
 def render_dashboard(session: ThrustStandSession, recorded: bool = False) -> Figure:
     """Build a static figure for inline display or VS Code's Plot Viewer."""
     session.poll()
-    source_count = max(1, len(session.sources))
-    thrust_rows = source_count * 2 + 1
-    row_count = max(3, thrust_rows)
+    row_count = CELL_COUNT + 1
     figure = plt.figure(figsize=(15, 2.8 * row_count), layout="constrained")
     grid = figure.add_gridspec(row_count, 2)
     figure.suptitle(
         "THRUST STAND — RECORDED TEST" if recorded else "THRUST STAND — LIVE",
         fontsize=16, fontweight="bold")
 
-    row = 0
-    for source_index in range(source_count):
-        source = session.sources[source_index] if source_index < len(session.sources) else None
-        for cell_index in range(2):
-            axis = figure.add_subplot(grid[row, 0])
-            row += 1
-            unit = (source.cell_units[cell_index] if source else None) or "Thrust (lbf)"
-            _style(axis, f"ESP {source_index + 1} — Load cell {cell_index + 1}", unit)
-            if source:
-                times = (source.record_cell_times[cell_index] if recorded
-                         else source.cell_times[cell_index])
-                raw = (source.record_cells[cell_index] if recorded
-                       else source.cells[cell_index])
-                filtered = (source.record_filtered_cells[cell_index] if recorded
-                            else source.filtered_cells[cell_index])
-                axis.plot(times, raw, color=COLORS[source_index], alpha=0.35,
-                          linewidth=0.9, label="Raw")
-                axis.plot(times, filtered, color=COLORS[source_index],
-                          linewidth=2.0, label="Filtered")
-                if times:
-                    axis.legend(loc="upper left")
-                peak = _finite_max(filtered) if unit == "Thrust (lbf)" else None
-                if peak is not None:
-                    axis.text(0.99, 0.96, f"Max: {peak:.3f} lbf",
-                              transform=axis.transAxes, ha="right", va="top")
+    source = session.sources[0] if session.sources else None
+    for cell_index in range(CELL_COUNT):
+        axis = figure.add_subplot(grid[cell_index, 0])
+        unit = (source.cell_units[cell_index] if source else None) or "Thrust (lbf)"
+        _style(axis, f"Load cell {cell_index + 1}", unit)
+        if source:
+            times = (source.record_cell_times[cell_index] if recorded
+                     else source.cell_times[cell_index])
+            raw = (source.record_cells[cell_index] if recorded
+                   else source.cells[cell_index])
+            filtered = (source.record_filtered_cells[cell_index] if recorded
+                        else source.filtered_cells[cell_index])
+            axis.plot(times, raw, color=CELL_COLORS[cell_index], alpha=0.35,
+                      linewidth=0.9, label="Raw")
+            axis.plot(times, filtered, color=CELL_COLORS[cell_index],
+                      linewidth=2.0, label="Filtered")
+            if times:
+                axis.legend(loc="upper left")
+            peak = _finite_max(filtered) if unit == "Thrust (lbf)" else None
+            if peak is not None:
+                axis.text(0.99, 0.96, f"Max: {peak:.3f} lbf",
+                          transform=axis.transAxes, ha="right", va="top")
 
-    total_axis = figure.add_subplot(grid[row, 0])
+    total_axis = figure.add_subplot(grid[CELL_COUNT, 0])
     total_times = session.record_total_times if recorded else session.total_times
     total_raw = session.record_total_values if recorded else session.total_values
     total_filtered = (
@@ -92,17 +87,17 @@ def render_dashboard(session: ThrustStandSession, recorded: bool = False) -> Fig
         axis = figure.add_subplot(grid[plot_row, 1])
         _style(axis, electrical_titles[metric], electrical_units[metric])
         plotted: list[float] = []
-        for source_index, source in enumerate(session.sources):
+        for source in session.sources:
             times = (source.record_electrical_times if recorded
                      else source.electrical_times)
             raw = (source.record_electrical_raw[metric] if recorded
                    else source.electrical_raw[metric])
             filtered = (source.record_electrical_filtered[metric] if recorded
                         else source.electrical_filtered[metric])
-            axis.plot(times, raw, color=COLORS[source_index], alpha=0.25,
+            axis.plot(times, raw, color="#9467bd", alpha=0.25,
                       linewidth=0.8)
-            axis.plot(times, filtered, color=COLORS[source_index],
-                      linewidth=2.0, label=source.label)
+            axis.plot(times, filtered, color="#9467bd",
+                      linewidth=2.0, label="MAUCH")
             plotted.extend(filtered)
         if session.sources and any(
                 (source.record_electrical_times if recorded

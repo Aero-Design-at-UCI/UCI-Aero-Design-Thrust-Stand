@@ -5,7 +5,6 @@
 
 # %%
 from realtime_logger import (
-    DEFAULT_SECOND_HOST,
     DEFAULT_TCP_PORT,
     DEFAULT_WIFI_HOST,
     ThrustStandSession,
@@ -32,14 +31,7 @@ elif CONNECTION != "offline":
     raise ValueError("CONNECTION must be serial, wifi, or offline")
 
 print(f"CSV recording: {session.output}")
-print("Connected sources:", [source.endpoint for source in session.sources])
-
-# %% [markdown]
-# ## Optional second ESP over Wi-Fi
-# Run only after ESP 1 is connected.
-
-# %%
-# session.connect_wifi(DEFAULT_SECOND_HOST, DEFAULT_TCP_PORT)
+print("Connected:", session.sources[0].endpoint if session.sources else "offline")
 
 # %% [markdown]
 # ## Live plot
@@ -54,17 +46,19 @@ show_live(session, seconds=30, refresh_seconds=0.5)
 # Remove the leading comment only from the command you intend to send.
 
 # %%
-# session.tare(target=1)
-# session.calibrate_cell(cell=1, force_lbf=2.20462, target=1)
-# session.calibrate_cell(cell=2, force_lbf=2.20462, target=1)
-# session.invert(target=1)
-# session.reset_load_calibration(target=1)
-# session.zero_current(target=1)
-# session.calibrate_current(amps=20.0, target=1)
-# session.zero_voltage(target=1)
-# session.calibrate_voltage(volts=24.0, target=1)
-# session.power_info(target=1)
-# session.reset_power_calibration(target=1)
+# session.tare()
+# session.calibrate_cell(cell=1, force_lbf=2.20462)
+# session.calibrate_cell(cell=2, force_lbf=2.20462)
+# session.calibrate_cell(cell=3, force_lbf=2.20462)
+# session.calibrate_cell(cell=4, force_lbf=2.20462)
+# session.invert()
+# session.reset_load_calibration()
+# session.zero_current()
+# session.calibrate_current(amps=20.0)
+# session.zero_voltage()
+# session.calibrate_voltage(volts=24.0)
+# session.power_info()
+# session.reset_power_calibration()
 
 # %% [markdown]
 # Run this after a calibration command to read the ESP response.

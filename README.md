@@ -1,14 +1,14 @@
-# ESP32 thrust stand with dual HX711 load cells and MAUCH PL-100
+# ESP32 thrust stand with four HX711 load cells and MAUCH PL-100
 
-This project reads two 20 kg load cells through two HX711 modules plus voltage and current from a MAUCH PL-100. It streams thrust and electrical measurements from an ESP32 over USB or Wi-Fi, saves everything to CSV, and plots it in real time. Electrical power is calculated as `voltage × current` in watts. `1 lbf = 4.448221615 N`.
+This project reads four 20 kg load cells through four HX711 modules plus voltage and current from a MAUCH PL-100. One ESP32 streams all thrust and electrical measurements over USB or Wi-Fi, saves everything to CSV, and plots it in real time. Electrical power is calculated as `voltage × current` in watts. `1 lbf = 4.448221615 N`.
 
 ## Confirmed hardware parameters
 
 - Connected ESP32 USB/UART: Silicon Labs CP210x on **COM7**
-- Two HX711 modules: 24-bit ADC, channel A gain 128
+- Four HX711 modules: 24-bit ADC, channel A gain 128
 - HX711 supply range: 2.6–5.5 V; this setup uses **3.3 V** for ESP32-safe logic
 - HX711 output: normally 10 samples/s; 80 samples/s only if the board's RATE jumper/pin is configured for it
-- Load-cell capacity: 20 kg (44.09 lbf) per cell; neither cell may exceed its individual rating
+- Load-cell capacity: 20 kg (44.09 lbf) per cell; no cell may exceed its individual rating
 - Serial link: 115200 baud
 - Wireless link: ESP32 access point `ThrustStand`, TCP port `3333`
 - MAUCH PL-100: 0–100 A current output mapped to 0–3.3 V
@@ -31,7 +31,7 @@ Use the same wiring for each common WishioT four-wire cell:
 
 If applied force reads negative, that is not dangerous or a calibration failure: the firmware learns the sign during calibration. Wire colors can vary, so use the markings supplied with your exact cell if they differ.
 
-### Both HX711 modules to the ESP32
+### All four HX711 modules to the ESP32
 
 | Module | HX711 pin | ESP32 |
 |---|---|---|
@@ -43,12 +43,20 @@ If applied force reads negative, that is not dangerous or a calibration failure:
 | HX711 2 | GND | GND |
 | HX711 2 | DT / DOUT | GPIO 18 |
 | HX711 2 | SCK / CLK | GPIO 19 |
+| HX711 3 | VCC | 3V3 |
+| HX711 3 | GND | GND |
+| HX711 3 | DT / DOUT | GPIO 21 |
+| HX711 3 | SCK / CLK | GPIO 22 |
+| HX711 4 | VCC | 3V3 |
+| HX711 4 | GND | GND |
+| HX711 4 | DT / DOUT | GPIO 25 |
+| HX711 4 | SCK / CLK | GPIO 26 |
 
-All grounds must be common. To use different pins, edit the two entries in the `cells` array near the top of the sketch.
+All four HX711 boards share the ESP32's 3V3 and GND. All grounds must be common. To use different pins, edit the four entries in the `cells` array near the top of the sketch.
 
-### MAUCH PL-100 to ESP 1
+### MAUCH PL-100 to the ESP32
 
-The firmware enables the PL-100 on ESP 1 only. ESP 2 does not sample its unconnected analog pins, so it cannot create false electrical readings.
+The same ESP32 also reads the PL-100.
 
 | MAUCH sensor connection | ESP32 / power connection |
 |---|---|
@@ -69,24 +77,22 @@ Open `firmware/thrust_stand_esp32/thrust_stand_esp32.ino` in Arduino IDE.
 
 1. Install Espressif's **esp32** board package in Boards Manager.
 2. Select your exact ESP32 board (for a common DevKit, use **ESP32 Dev Module**).
-3. Leave `DEVICE_NUMBER = 1`, select the first ESP32's port, and upload it. This ESP creates the Wi-Fi network at `192.168.4.1`.
-4. For an optional second ESP32, change the constant to `DEVICE_NUMBER = 2`, select that board's port, and upload again. ESP 2 joins ESP 1's network at `192.168.4.2`.
+3. Select the ESP32's port and upload the sketch. The ESP32 creates the Wi-Fi network at `192.168.4.1`.
 
 The firmware contains its own HX711 reader, so no HX711 Arduino library is required.
 
-ESP 1 provides the shared network:
+The ESP32 provides the instrument network:
 
 | Setting | Value |
 |---|---|
 | Wi-Fi name | `ThrustStand` |
 | Password | Set `WIFI_PASSWORD` locally before flashing |
-| ESP 1 address | `192.168.4.1` |
-| ESP 2 address | `192.168.4.2` |
+| ESP32 address | `192.168.4.1` |
 | TCP port | `3333` |
 
 Before flashing, replace the public `CHANGE_ME_BEFORE_FLASHING` placeholder in
 `WIFI_PASSWORD` near the top of the sketch with a private password containing at
-least eight characters. Use the same SSID and password on both ESP32 boards.
+least eight characters.
 
 ## 2. Install and run the VS Code logger
 
@@ -128,18 +134,16 @@ CSV is flushed cleanly.
 
 ### Run wirelessly
 
-1. Power ESP 1 first, then ESP 2 if used. Each can use a USB power bank or another stable 5 V USB supply.
+1. Power the ESP32 from USB or another stable 5 V USB supply.
 2. On the plotting computer, connect to **ThrustStand** using the private password you configured in `WIFI_PASSWORD`. Windows may report “No internet”; remain connected because this is a private instrument network.
-3. In the setup cell, set `CONNECTION = "wifi"` and run it. ESP 1 defaults
+3. In the setup cell, set `CONNECTION = "wifi"` and run it. The ESP32 defaults
    to `192.168.4.1:3333`.
-4. To add ESP 2, run the optional second-ESP cell, which connects to
-   `192.168.4.2:3333`.
 
-The interactive workflow supports one or two ESPs. Load-cell and combined
+The interactive workflow uses one ESP32. Four load-cell plots and combined
 thrust plots are on the left; battery voltage, current, and electrical power
 are on the right. Run the live-plot cell for a bounded refresh interval and
 re-run it whenever another interval is wanted. Hardware acquisition continues
-between plot cells. Each ESP still accepts only one network logger connection,
+between plot cells. The ESP32 accepts only one network logger connection,
 and USB serial remains available for diagnostics.
 
 ### Record and save a complete plot image
@@ -157,24 +161,22 @@ and USB serial remains available for diagnostics.
 Each connected load cell must be calibrated independently before it can contribute accurate thrust data.
 
 1. Leave the motor and all mounting hardware installed. Turn the motor off and make sure nothing is pushing or pulling on the rig.
-2. Run `session.tare(target=1)` and keep its complete rig still. This zeros every responding cell on that ESP and skips a disconnected cell.
-3. Apply a precisely known force directly over cell 1 so the calibration load is carried by that sensor, then run `session.calibrate_cell(1, force_lbf, target=1)`.
-4. Move the same known force directly over cell 2 and run `session.calibrate_cell(2, force_lbf, target=1)`.
-5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, run `session.invert(target=1)` once; every calibrated cell on that ESP is reversed.
-6. If a second ESP is connected, select target `2` and repeat the calibration for its two sensors.
+2. Run `session.tare()` and keep the complete rig still. This zeros every responding cell and skips a disconnected cell.
+3. Apply a precisely known force directly over cell 1, then run `session.calibrate_cell(1, force_lbf)`.
+4. Repeat separately for cells 2, 3, and 4 with `session.calibrate_cell(2, force_lbf)`, `session.calibrate_cell(3, force_lbf)`, and `session.calibrate_cell(4, force_lbf)`.
+5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, run `session.invert()` once; every calibrated cell is reversed.
 
-The ESP32 stores separate zero and calibration values for both sensors in nonvolatile memory. Before later tests, leave the complete rig installed and run the tare command after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
+The ESP32 stores separate zero and calibration values for all four sensors in nonvolatile memory. Before later tests, leave the complete rig installed and run the tare command after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
 
 ## 4. Calibrate the MAUCH PL-100
 
-Electrical calibration is enabled on ESP 1. Remove the propeller and mechanically disable the motor before calibration. Use a properly rated DC clamp meter for current; never put an ordinary handheld multimeter current input in series with propulsion wiring.
+Remove the propeller and mechanically disable the motor before electrical calibration. Use a properly rated DC clamp meter for current; never put an ordinary handheld multimeter current input in series with propulsion wiring.
 
-1. Use target `1` for the MAUCH sensor.
-2. With the MAUCH electronics powered but no propulsion current flowing, run `session.zero_current(target=1)`.
-3. Disconnect the propulsion battery while leaving the sensor electronics powered, then run `session.zero_voltage(target=1)`.
-4. Reconnect the battery. Measure its voltage with a DVM and run `session.calibrate_voltage(reference_volts, target=1)`.
-5. Run a safe, steady load well below the sensor and wiring limits, measure it simultaneously with a DC clamp meter, and run `session.calibrate_current(reference_amps, target=1)`.
-6. Stop the load and verify that current returns near zero and displayed voltage agrees with the DVM. `session.power_info(target=1)` reports saved offsets and slopes; `session.reset_power_calibration(target=1)` restores factory approximations.
+1. With the MAUCH electronics powered but no propulsion current flowing, run `session.zero_current()`.
+2. Disconnect the propulsion battery while leaving the sensor electronics powered, then run `session.zero_voltage()`.
+3. Reconnect the battery. Measure its voltage with a DVM and run `session.calibrate_voltage(reference_volts)`.
+4. Run a safe, steady load well below the sensor and wiring limits, measure it simultaneously with a DC clamp meter, and run `session.calibrate_current(reference_amps)`.
+5. Stop the load and verify that current returns near zero and displayed voltage agrees with the DVM. `session.power_info()` reports saved offsets and slopes; `session.reset_power_calibration()` restores factory approximations.
 
 Current and voltage use independent two-point fits: the zero commands save ADC offsets, while the calibration commands calculate units per ADC count from the entered reference. The values survive power cycles. Calibrate near the middle or upper-middle of the range you normally use, without approaching the 100 A PL-100 limit.
 
@@ -182,12 +184,12 @@ The original ESP32 ADC becomes unreliable at the ends of its range. The session 
 
 ## Measurement notes
 
-- Each ESP has a separate plot for load cell 1 and load cell 2. The bottom plot sums every fresh, calibrated load cell across the connected ESPs. Faint lines are raw data and solid lines are filtered data.
+- Each of the four load cells has a separate plot. The bottom plot sums every fresh, calibrated load cell. Faint lines are raw data and solid lines are filtered data.
 - Every generated plot shows the maximum filtered value in its displayed interval: pounds-force for each calibrated load cell and total thrust, volts, amps, and watts. Saved PNGs calculate the corresponding maxima for the complete marked interval.
-- A missing, unpowered, or uncalibrated load cell is reported as `NaN`, bypassed automatically, and excluded from the combined total. The other load cell continues sampling normally.
+- A missing, unpowered, or uncalibrated load cell is reported as `NaN`, bypassed automatically, and excluded from the combined total. The other load cells continue sampling normally.
 - If a cell is responding but has no calibration, its individual panel switches to **ADC counts (uncalibrated)** so wiring and sensor activity remain visible. ADC counts never contribute to the pounds-force total.
 - Upgrading from the original single-cell firmware automatically migrates its saved `zero` and `scale` values to load cell 1.
-- The CSV retains the ESP identity, both raw ADC counts, both calibrated cell forces, and each ESP's available-cell total.
+- The CSV retains all four raw ADC counts, all four calibrated cell forces, and the available-cell total.
 - The CSV uses `record_type=thrust` or `record_type=electrical`. Electrical rows include raw ADC counts, current, voltage, instantaneous power, and their filtered values.
 - GPIO34 and GPIO35 are ADC1 inputs, so they continue working while ESP32 Wi-Fi is active. The firmware averages 16 ADC readings and publishes electrical data at 20 samples/s.
 - The default 10 SPS mode is good for static measurements but may miss fast thrust peaks. If the HX711 module exposes a RATE pad/jumper, set RATE high for 80 SPS and restart. Many boards require a solder-jumper modification—verify the board markings first.

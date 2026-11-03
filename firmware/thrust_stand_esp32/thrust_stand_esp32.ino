@@ -1,8 +1,10 @@
 /*
-  ESP32 dual-load-cell thrust stand
+  ESP32 four-load-cell thrust stand
 
   HX711/load cell 1: DT GPIO4,  SCK GPIO5
   HX711/load cell 2: DT GPIO18, SCK GPIO19
+  HX711/load cell 3: DT GPIO21, SCK GPIO22
+  HX711/load cell 4: DT GPIO25, SCK GPIO26
   MAUCH PL-100: current signal GPIO34, voltage signal GPIO35
 
   Wireless access point:
@@ -10,16 +12,15 @@
     Password: set WIFI_PASSWORD locally before flashing
     TCP: 192.168.4.1:3333
 
-  Set DEVICE_NUMBER to 1 before uploading ESP 1. Set it to 2 before
-  uploading ESP 2. ESP 1 creates the network; ESP 2 joins it at 192.168.4.2.
-
   Commands (USB serial or Wi-Fi TCP, newline terminated):
-    TARE           zero both cells with the complete stationary rig installed
+    TARE           zero all available cells with the stationary rig installed
     CALLBF1 <lbf>  calibrate cell 1 with a known force applied to cell 1
     CALLBF2 <lbf>  calibrate cell 2 with a known force applied to cell 2
-    INVERT         reverse both displayed force directions
+    CALLBF3 <lbf>  calibrate cell 3 with a known force applied to cell 3
+    CALLBF4 <lbf>  calibrate cell 4 with a known force applied to cell 4
+    INVERT         reverse all calibrated force directions
     INFO           print configuration
-    RESETCAL       erase both calibration factors
+    RESETCAL       erase all four calibration factors
     POWERINFO      print MAUCH electrical-sensor configuration
     ZEROAMPS       capture zero-current ADC offset with motor off
     ZEROVOLTS      capture zero-voltage ADC offset with battery disconnected
@@ -35,7 +36,7 @@
 #include <stdarg.h>
 
 constexpr uint32_t SERIAL_BAUD = 115200;
-constexpr uint8_t DEVICE_NUMBER = 1; // valid values: 1 (primary) or 2 (secondary)
+constexpr uint8_t CELL_COUNT = 4;
 constexpr uint16_t TCP_PORT = 3333;
 constexpr char WIFI_SSID[] = "ThrustStand";
 // Public-repository placeholder. Replace this locally with a private password
@@ -50,10 +51,10 @@ constexpr double STANDARD_GRAVITY = 9.80665;
 constexpr double NEWTONS_PER_LBF = 4.4482216152605;
 constexpr double EMA_ALPHA = 0.30;
 
-// MAUCH PL-100 integration. The sensor is connected to ESP 1 by default.
+// MAUCH PL-100 integration.
 // Its conditioned current output is 0.0-3.3 V for 0-100 A. The voltage
 // output is battery voltage divided by the board's configured divider.
-constexpr bool ENABLE_MAUCH_SENSOR = DEVICE_NUMBER == 1;
+constexpr bool ENABLE_MAUCH_SENSOR = true;
 constexpr uint8_t MAUCH_CURRENT_PIN = 34; // ADC1; safe while Wi-Fi is active
 constexpr uint8_t MAUCH_VOLTAGE_PIN = 35; // ADC1; safe while Wi-Fi is active
 constexpr double MAUCH_VOLTAGE_DIVIDER = 10.0; // solder bridge IN, max 33 V
@@ -74,9 +75,11 @@ struct LoadCell {
   double filteredKgf;
 };
 
-LoadCell cells[2] = {
+LoadCell cells[CELL_COUNT] = {
   {4, 5, "zero1", "scale1", 0, NAN, NAN},
-  {18, 19, "zero2", "scale2", 0, NAN, NAN}
+  {18, 19, "zero2", "scale2", 0, NAN, NAN},
+  {21, 22, "zero3", "scale3", 0, NAN, NAN},
+  {25, 26, "zero4", "scale4", 0, NAN, NAN}
 };
 
 Preferences prefs;
@@ -93,7 +96,7 @@ double currentAperCount = DEFAULT_CURRENT_A_PER_COUNT;
 double voltageVperCount = DEFAULT_VOLTAGE_V_PER_COUNT;
 
 IPAddress networkIp() {
-  return DEVICE_NUMBER == 1 ? WiFi.softAPIP() : WiFi.localIP();
+  return WiFi.softAPIP();
 }
 
 void emitLine(const String &line) {
@@ -153,14 +156,15 @@ bool averageRaw(LoadCell &cell, size_t sampleCount, int64_t &average) {
 }
 
 void printInfo() {
-  const String scale1 = isfinite(cells[0].countsPerKg) ? String(cells[0].countsPerKg, 6) : "not_calibrated";
-  const String scale2 = isfinite(cells[1].countsPerKg) ? String(cells[1].countsPerKg, 6) : "not_calibrated";
-  emitf("# INFO,cell1_dout=%u,cell1_sck=%u,cell1_zero=%lld,cell1_counts_per_kg=%s",
-        cells[0].doutPin, cells[0].sckPin, cells[0].zeroOffset, scale1.c_str());
-  emitf("# INFO,cell2_dout=%u,cell2_sck=%u,cell2_zero=%lld,cell2_counts_per_kg=%s",
-        cells[1].doutPin, cells[1].sckPin, cells[1].zeroOffset, scale2.c_str());
-  emitf("# INFO,device=%u,wifi_ssid=%s,wifi_ip=%s,tcp_port=%u",
-        DEVICE_NUMBER, WIFI_SSID, networkIp().toString().c_str(), TCP_PORT);
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
+    const String scale = isfinite(cells[i].countsPerKg)
+        ? String(cells[i].countsPerKg, 6) : "not_calibrated";
+    emitf("# INFO,cell=%u,dout=%u,sck=%u,zero=%lld,counts_per_kg=%s",
+          i + 1, cells[i].doutPin, cells[i].sckPin,
+          cells[i].zeroOffset, scale.c_str());
+  }
+  emitf("# INFO,wifi_ssid=%s,wifi_ip=%s,tcp_port=%u",
+        WIFI_SSID, networkIp().toString().c_str(), TCP_PORT);
   emitf("# POWERINFO,enabled=%u,current_pin=%u,voltage_pin=%u,voltage_divider=%.6f,current_zero_raw=%lu,voltage_zero_raw=%lu,current_A_per_count=%.9f,voltage_V_per_count=%.9f",
         ENABLE_MAUCH_SENSOR ? 1 : 0, MAUCH_CURRENT_PIN, MAUCH_VOLTAGE_PIN,
         MAUCH_VOLTAGE_DIVIDER, currentZeroRaw, voltageZeroRaw,
@@ -261,7 +265,7 @@ void sampleElectricalPower() {
 void tareAll() {
   emitLine("# STATUS,Zeroing available cells: motor off, no applied thrust, keep the rig still");
   uint8_t zeroed = 0;
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     int64_t average;
     if (!averageRaw(cells[i], ZERO_SAMPLES, average)) {
       emitf("# STATUS,HX711 cell %u unavailable; skipped during tare", i + 1);
@@ -273,15 +277,14 @@ void tareAll() {
     ++zeroed;
   }
   if (zeroed) {
-    emitf("# STATUS,Tare complete,zeroed_cells=%u,cell1_zero=%lld,cell2_zero=%lld",
-          zeroed, cells[0].zeroOffset, cells[1].zeroOffset);
+    emitf("# STATUS,Tare complete,zeroed_cells=%u", zeroed);
   } else {
     emitLine("# ERROR,No HX711 cells responded during tare");
   }
 }
 
 void calibrateCell(uint8_t index, double knownLbf) {
-  if (index > 1) return;
+  if (index >= CELL_COUNT) return;
   if (!isfinite(knownLbf) || knownLbf <= 0.0 || knownLbf > 44.0925) {
     emitLine("# ERROR,Calibration force must be greater than 0 and at most 44.0925 lbf per cell");
     return;
@@ -312,7 +315,7 @@ void calibrateCell(uint8_t index, double knownLbf) {
 
 void invertDirection() {
   uint8_t inverted = 0;
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     if (!isfinite(cells[i].countsPerKg)) continue;
     cells[i].countsPerKg = -cells[i].countsPerKg;
     cells[i].filteredKgf = NAN;
@@ -335,8 +338,12 @@ void handleCommand(String command) {
     calibrateCell(0, command.substring(8).toDouble());
   } else if (upper.startsWith("CALLBF2 ")) {
     calibrateCell(1, command.substring(8).toDouble());
+  } else if (upper.startsWith("CALLBF3 ")) {
+    calibrateCell(2, command.substring(8).toDouble());
+  } else if (upper.startsWith("CALLBF4 ")) {
+    calibrateCell(3, command.substring(8).toDouble());
   } else if (upper.startsWith("CALLBF ")) {
-    emitLine("# ERROR,Two-cell mode requires CALLBF1 <lbf> and CALLBF2 <lbf>");
+    emitLine("# ERROR,Use CALLBF1, CALLBF2, CALLBF3, or CALLBF4");
   } else if (upper == "INVERT") {
     invertDirection();
   } else if (upper == "I" || upper == "INFO") {
@@ -363,14 +370,14 @@ void handleCommand(String command) {
     resetPowerFilters();
     emitLine("# STATUS,Electrical calibration reset to defaults");
   } else if (upper == "RESETCAL") {
-    for (uint8_t i = 0; i < 2; ++i) {
+    for (uint8_t i = 0; i < CELL_COUNT; ++i) {
       cells[i].countsPerKg = NAN;
       cells[i].filteredKgf = NAN;
       prefs.remove(cells[i].scaleKey);
     }
-    emitLine("# STATUS,Both calibration factors erased");
+    emitLine("# STATUS,All four calibration factors erased");
   } else {
-    emitLine("# ERROR,Use TARE, CALLBF1/2 <lbf>, INVERT, INFO, ZEROAMPS, ZEROVOLTS, CALAMPS <A>, CALVOLTS <V>, RESETPOWER, or RESETCAL");
+    emitLine("# ERROR,Use TARE, CALLBF1/2/3/4 <lbf>, INVERT, INFO, ZEROAMPS, ZEROVOLTS, CALAMPS <A>, CALVOLTS <V>, RESETPOWER, or RESETCAL");
   }
 }
 
@@ -413,7 +420,7 @@ void serviceWifiClient() {
 }
 
 void setup() {
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     pinMode(cells[i].doutPin, INPUT_PULLUP);
     pinMode(cells[i].sckPin, OUTPUT);
     digitalWrite(cells[i].sckPin, LOW);
@@ -429,27 +436,14 @@ void setup() {
     analogSetPinAttenuation(MAUCH_VOLTAGE_PIN, ADC_11db);
   }
 
-  bool wifiReady = false;
-  if (DEVICE_NUMBER == 1) {
-    WiFi.mode(WIFI_AP);
-    wifiReady = WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
-  } else {
-    WiFi.mode(WIFI_STA);
-    const IPAddress localIp(192, 168, 4, DEVICE_NUMBER);
-    const IPAddress gateway(192, 168, 4, 1);
-    const IPAddress subnet(255, 255, 255, 0);
-    WiFi.config(localIp, gateway, subnet);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    const uint32_t connectStarted = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - connectStarted < 15000) delay(100);
-    wifiReady = WiFi.status() == WL_CONNECTED;
-  }
+  WiFi.mode(WIFI_AP);
+  const bool wifiReady = WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 
   if (wifiReady) {
     tcpServer.begin();
     tcpServer.setNoDelay(true);
-    Serial.printf("# STATUS,ESP %u WiFi ready: %s:%u\n",
-                  DEVICE_NUMBER, networkIp().toString().c_str(), TCP_PORT);
+    Serial.printf("# STATUS,WiFi ready: %s:%u\n",
+                  networkIp().toString().c_str(), TCP_PORT);
   } else {
     Serial.println("# ERROR,Could not establish WiFi; USB serial still works");
   }
@@ -477,7 +471,7 @@ void setup() {
       emitLine("# STATUS,Migrated legacy calibration factor to cell 1");
     }
   }
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     cells[i].zeroOffset = prefs.getLong64(cells[i].zeroKey, 0);
     cells[i].countsPerKg = prefs.getDouble(cells[i].scaleKey, NAN);
     if (isfinite(cells[i].countsPerKg) && fabs(cells[i].countsPerKg) < MIN_COUNTS_PER_KG) {
@@ -486,32 +480,38 @@ void setup() {
     }
   }
 
-  emitf("# THRUST_STAND_V7_POWER_CAL,device=%u", DEVICE_NUMBER);
-  emitLine("# COLUMNS,time_ms,raw1,raw2,kgf1,kgf2,total_kgf,total_force_N,filtered_total_force_N");
+  emitLine("# THRUST_STAND_V8_FOUR_CELL_POWER_CAL");
+  emitLine("# COLUMNS,time_ms,raw1,raw2,raw3,raw4,kgf1,kgf2,kgf3,kgf4,total_kgf,total_force_N,filtered_total_force_N");
   if (ENABLE_MAUCH_SENSOR) {
     emitLine("# POWER_COLUMNS,time_ms,current_adc_raw,voltage_adc_raw,current_A,voltage_V,power_W,filtered_current_A,filtered_voltage_V,filtered_power_W");
   }
   printInfo();
 
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     if (!hxReady(cells[i], HX_TIMEOUT_MS)) {
       emitf("# ERROR,HX711 cell %u not ready; check its wiring and power", i + 1);
     }
   }
 
   for (size_t sample = 0; sample < STARTUP_DISCARD_SAMPLES; ++sample) {
-    for (uint8_t i = 0; i < 2; ++i) {
+    for (uint8_t i = 0; i < CELL_COUNT; ++i) {
       int32_t discarded;
       if (digitalRead(cells[i].doutPin) == LOW) hxRead(cells[i], discarded, 20);
     }
     delay(10);
   }
 
-  if (!cells[0].zeroOffset || !cells[1].zeroOffset) {
+  bool missingZero = false;
+  bool missingCalibration = false;
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
+    missingZero |= cells[i].zeroOffset == 0;
+    missingCalibration |= !isfinite(cells[i].countsPerKg);
+  }
+  if (missingZero) {
     emitLine("# STATUS,Send TARE with the complete stand unloaded");
   }
-  if (!isfinite(cells[0].countsPerKg) || !isfinite(cells[1].countsPerKg)) {
-    emitLine("# STATUS,Calibrate each sensor separately with CALLBF1 and CALLBF2");
+  if (missingCalibration) {
+    emitLine("# STATUS,Calibrate each sensor separately with CALLBF1 through CALLBF4");
   }
 }
 
@@ -520,19 +520,21 @@ void loop() {
   serviceWifiClient();
   sampleElectricalPower();
 
-  int32_t raw[2] = {0, 0};
-  bool received[2] = {false, false};
-  for (uint8_t i = 0; i < 2; ++i) {
+  int32_t raw[CELL_COUNT] = {0, 0, 0, 0};
+  bool received[CELL_COUNT] = {false, false, false, false};
+  bool anyReceived = false;
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     if (digitalRead(cells[i].doutPin) == LOW) received[i] = hxRead(cells[i], raw[i], 20);
+    anyReceived |= received[i];
   }
-  if (!received[0] && !received[1]) return;
+  if (!anyReceived) return;
 
-  double kgf[2] = {NAN, NAN};
-  double filteredKgf[2] = {NAN, NAN};
+  double kgf[CELL_COUNT] = {NAN, NAN, NAN, NAN};
+  double filteredKgf[CELL_COUNT] = {NAN, NAN, NAN, NAN};
   double totalKgf = 0.0;
   double filteredTotalKgf = 0.0;
   uint8_t validCells = 0;
-  for (uint8_t i = 0; i < 2; ++i) {
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     if (!received[i] || !isfinite(cells[i].countsPerKg)) continue;
     kgf[i] = static_cast<double>(static_cast<int64_t>(raw[i]) - cells[i].zeroOffset) /
              cells[i].countsPerKg;
@@ -547,7 +549,8 @@ void loop() {
   const double reportedTotalKgf = validCells ? totalKgf : NAN;
   const double totalForceN = validCells ? totalKgf * STANDARD_GRAVITY : NAN;
   const double filteredTotalN = validCells ? filteredTotalKgf * STANDARD_GRAVITY : NAN;
-  emitf("DATA,%lu,%ld,%ld,%.6f,%.6f,%.6f,%.6f,%.6f",
-        millis(), raw[0], raw[1], kgf[0], kgf[1], reportedTotalKgf,
+  emitf("DATA,%lu,%ld,%ld,%ld,%ld,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+        millis(), raw[0], raw[1], raw[2], raw[3],
+        kgf[0], kgf[1], kgf[2], kgf[3], reportedTotalKgf,
         totalForceN, filteredTotalN);
 }

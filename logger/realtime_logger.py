@@ -23,16 +23,18 @@ from serial.tools import list_ports
 
 BAUD = 115200
 DEFAULT_WIFI_HOST = "192.168.4.1"
-DEFAULT_SECOND_HOST = "192.168.4.2"
 DEFAULT_TCP_PORT = 3333
+CELL_COUNT = 4
 STANDARD_GRAVITY = 9.80665
 NEWTONS_PER_LBF = 4.4482216152605
 EMA_ALPHA = 0.30
 TOTAL_FRESHNESS_SECONDS = 1.0
 CSV_HEADER = [
     "host_time_iso", "record_type", "source", "endpoint", "esp_time_ms",
-    "raw1", "raw2", "kgf1", "kgf2", "total_kgf", "total_force_N",
-    "filtered_total_force_N", "cell1_lbf", "cell2_lbf", "total_force_lbf",
+    "raw1", "raw2", "raw3", "raw4",
+    "kgf1", "kgf2", "kgf3", "kgf4", "total_kgf", "total_force_N",
+    "filtered_total_force_N", "cell1_lbf", "cell2_lbf", "cell3_lbf",
+    "cell4_lbf", "total_force_lbf",
     "filtered_total_force_lbf", "current_adc_raw", "voltage_adc_raw",
     "current_A", "voltage_V", "power_W", "filtered_current_A",
     "filtered_voltage_V", "filtered_power_W",
@@ -85,29 +87,39 @@ def choose_port(requested: str | None = None) -> str:
 
 
 def parse_sample(parts: list[str]) -> dict[str, float | int] | None:
-    """Parse current dual-cell and legacy single-cell DATA records."""
+    """Parse current four-cell and legacy one/two-cell DATA records."""
     if not parts or parts[0] != "DATA":
         return None
-    if len(parts) == 9:
+    if len(parts) == 13:
         esp_ms = int(parts[1])
-        raw1, raw2 = int(parts[2]), int(parts[3])
-        kgf1, kgf2, total_kgf, force_n, filtered_n = map(float, parts[4:9])
+        raw = list(map(int, parts[2:6]))
+        kgf = list(map(float, parts[6:10]))
+        total_kgf, force_n, filtered_n = map(float, parts[10:13])
+    elif len(parts) == 9:
+        esp_ms = int(parts[1])
+        raw = [int(parts[2]), int(parts[3]), 0, 0]
+        kgf = [*map(float, parts[4:6]), math.nan, math.nan]
+        total_kgf, force_n, filtered_n = map(float, parts[6:9])
     elif len(parts) == 6:
         esp_ms, raw1 = int(parts[1]), int(parts[2])
-        raw2 = 0
         kgf1, force_n, filtered_n = map(float, parts[3:6])
-        kgf2, total_kgf = 0.0, kgf1
+        raw = [raw1, 0, 0, 0]
+        kgf = [kgf1, math.nan, math.nan, math.nan]
+        total_kgf = kgf1
     else:
         return None
-    return {
-        "esp_ms": esp_ms, "raw1": raw1, "raw2": raw2,
-        "kgf1": kgf1, "kgf2": kgf2, "total_kgf": total_kgf,
+    result: dict[str, float | int] = {
+        "esp_ms": esp_ms, "total_kgf": total_kgf,
         "force_n": force_n, "filtered_n": filtered_n,
-        "cell1_lbf": kgf1 * STANDARD_GRAVITY / NEWTONS_PER_LBF,
-        "cell2_lbf": kgf2 * STANDARD_GRAVITY / NEWTONS_PER_LBF,
         "total_lbf": force_n / NEWTONS_PER_LBF,
         "filtered_lbf": filtered_n / NEWTONS_PER_LBF,
     }
+    for index in range(CELL_COUNT):
+        result[f"raw{index + 1}"] = raw[index]
+        result[f"kgf{index + 1}"] = kgf[index]
+        result[f"cell{index + 1}_lbf"] = (
+            kgf[index] * STANDARD_GRAVITY / NEWTONS_PER_LBF)
+    return result
 
 
 def parse_power(parts: list[str]) -> dict[str, float | int] | None:
@@ -130,21 +142,33 @@ class SourceState:
     label: str
     endpoint: str
     transport: Any
-    cell_times: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
-    cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
-    filtered_cells: list[deque[float]] = field(default_factory=lambda: [deque(), deque()])
-    cell_units: list[str | None] = field(default_factory=lambda: [None, None])
-    filter_state: list[float] = field(default_factory=lambda: [math.nan, math.nan])
-    force_filter_state: list[float] = field(default_factory=lambda: [math.nan, math.nan])
-    latest_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
-    latest_filtered_cells: list[float] = field(default_factory=lambda: [math.nan, math.nan])
-    latest_cell_times: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    cell_times: list[deque[float]] = field(
+        default_factory=lambda: [deque() for _ in range(CELL_COUNT)])
+    cells: list[deque[float]] = field(
+        default_factory=lambda: [deque() for _ in range(CELL_COUNT)])
+    filtered_cells: list[deque[float]] = field(
+        default_factory=lambda: [deque() for _ in range(CELL_COUNT)])
+    cell_units: list[str | None] = field(
+        default_factory=lambda: [None] * CELL_COUNT)
+    filter_state: list[float] = field(
+        default_factory=lambda: [math.nan] * CELL_COUNT)
+    force_filter_state: list[float] = field(
+        default_factory=lambda: [math.nan] * CELL_COUNT)
+    latest_cells: list[float] = field(
+        default_factory=lambda: [math.nan] * CELL_COUNT)
+    latest_filtered_cells: list[float] = field(
+        default_factory=lambda: [math.nan] * CELL_COUNT)
+    latest_cell_times: list[float] = field(
+        default_factory=lambda: [0.0] * CELL_COUNT)
     electrical_times: deque[float] = field(default_factory=deque)
     electrical_raw: list[deque[float]] = field(default_factory=lambda: [deque(), deque(), deque()])
     electrical_filtered: list[deque[float]] = field(default_factory=lambda: [deque(), deque(), deque()])
-    record_cell_times: list[list[float]] = field(default_factory=lambda: [[], []])
-    record_cells: list[list[float]] = field(default_factory=lambda: [[], []])
-    record_filtered_cells: list[list[float]] = field(default_factory=lambda: [[], []])
+    record_cell_times: list[list[float]] = field(
+        default_factory=lambda: [[] for _ in range(CELL_COUNT)])
+    record_cells: list[list[float]] = field(
+        default_factory=lambda: [[] for _ in range(CELL_COUNT)])
+    record_filtered_cells: list[list[float]] = field(
+        default_factory=lambda: [[] for _ in range(CELL_COUNT)])
     record_electrical_times: list[float] = field(default_factory=list)
     record_electrical_raw: list[list[float]] = field(default_factory=lambda: [[], [], []])
     record_electrical_filtered: list[list[float]] = field(default_factory=lambda: [[], [], []])
@@ -200,11 +224,10 @@ class ThrustStandSession:
         if self._closed:
             transport.close()
             raise RuntimeError("session is closed")
-        if len(self.sources) >= 2:
+        if self.sources:
             transport.close()
-            raise RuntimeError("At most two ESP sources are supported")
-        number = len(self.sources) + 1
-        source = SourceState(number, f"ESP {number}", endpoint, transport)
+            raise RuntimeError("The one-ESP workflow already has a connected source")
+        source = SourceState(1, "ESP", endpoint, transport)
         self.sources.append(source)
         thread = threading.Thread(target=self._read_source, args=(source,), daemon=True)
         self._threads.append(thread)
@@ -243,17 +266,22 @@ class ThrustStandSession:
             if sample is not None:
                 self._writer.writerow([
                     host_iso, "thrust", source.label, source.endpoint,
-                    sample["esp_ms"], sample["raw1"], sample["raw2"],
-                    sample["kgf1"], sample["kgf2"], sample["total_kgf"],
+                    sample["esp_ms"],
+                    *[sample[f"raw{index + 1}"] for index in range(CELL_COUNT)],
+                    *[sample[f"kgf{index + 1}"] for index in range(CELL_COUNT)],
+                    sample["total_kgf"],
                     sample["force_n"], sample["filtered_n"], sample["cell1_lbf"],
-                    sample["cell2_lbf"], sample["total_lbf"], sample["filtered_lbf"],
+                    sample["cell2_lbf"], sample["cell3_lbf"], sample["cell4_lbf"],
+                    sample["total_lbf"], sample["filtered_lbf"],
                     "", "", "", "", "", "", "", "",
                 ])
             else:
                 assert power is not None
                 self._writer.writerow([
                     host_iso, "electrical", source.label, source.endpoint,
-                    power["esp_ms"], "", "", "", "", "", "", "", "", "", "", "",
+                    power["esp_ms"],
+                    *[""] * 4, *[""] * 4, "", "", "",
+                    *[""] * 4, "", "",
                     power["current_raw"], power["voltage_raw"], power["current_a"],
                     power["voltage_v"], power["power_w"], power["filtered_current_a"],
                     power["filtered_voltage_v"], power["filtered_power_w"],
@@ -312,9 +340,11 @@ class ThrustStandSession:
     def _process_sample(self, source: SourceState, host_mono: float,
                         sample: dict[str, Any], statuses: list[str]) -> None:
         elapsed = host_mono - self._started
-        forces = [float(sample["cell1_lbf"]), float(sample["cell2_lbf"])]
-        counts = [float(sample["raw1"]), float(sample["raw2"])]
-        filtered_displayed = [math.nan, math.nan]
+        forces = [
+            float(sample[f"cell{index + 1}_lbf"]) for index in range(CELL_COUNT)]
+        counts = [
+            float(sample[f"raw{index + 1}"]) for index in range(CELL_COUNT)]
+        filtered_displayed = [math.nan] * CELL_COUNT
         for index, force in enumerate(forces):
             if source.cell_units[index] is None:
                 if math.isfinite(force):
@@ -358,7 +388,7 @@ class ThrustStandSession:
         active_raw: list[float] = []
         active_filtered: list[float] = []
         for active_source in self.sources:
-            for index in range(2):
+            for index in range(CELL_COUNT):
                 fresh = host_mono - active_source.latest_cell_times[index] <= TOTAL_FRESHNESS_SECONDS
                 if fresh and math.isfinite(active_source.latest_cells[index]):
                     active_raw.append(active_source.latest_cells[index])
@@ -378,48 +408,48 @@ class ThrustStandSession:
             self.total_values.popleft()
             self.total_filtered.popleft()
 
-    def send(self, command: str, target: int = 1) -> None:
-        if target < 1 or target > len(self.sources):
-            raise ValueError(f"ESP {target} is not connected")
-        self.sources[target - 1].transport.write((command.strip() + "\n").encode("ascii"))
+    def send(self, command: str) -> None:
+        if not self.sources:
+            raise RuntimeError("The ESP is not connected")
+        self.sources[0].transport.write((command.strip() + "\n").encode("ascii"))
 
-    def tare(self, target: int = 1) -> None:
-        self.send("TARE", target)
+    def tare(self) -> None:
+        self.send("TARE")
 
-    def calibrate_cell(self, cell: int, force_lbf: float, target: int = 1) -> None:
-        if cell not in (1, 2):
-            raise ValueError("cell must be 1 or 2")
+    def calibrate_cell(self, cell: int, force_lbf: float) -> None:
+        if cell not in range(1, CELL_COUNT + 1):
+            raise ValueError("cell must be 1, 2, 3, or 4")
         if not 0 < force_lbf <= 44.0925:
             raise ValueError("force_lbf must be > 0 and <= 44.0925")
-        self.send(f"CALLBF{cell} {force_lbf:.6f}", target)
+        self.send(f"CALLBF{cell} {force_lbf:.6f}")
 
-    def invert(self, target: int = 1) -> None:
-        self.send("INVERT", target)
+    def invert(self) -> None:
+        self.send("INVERT")
 
-    def reset_load_calibration(self, target: int = 1) -> None:
-        self.send("RESETCAL", target)
+    def reset_load_calibration(self) -> None:
+        self.send("RESETCAL")
 
-    def zero_current(self, target: int = 1) -> None:
-        self.send("ZEROAMPS", target)
+    def zero_current(self) -> None:
+        self.send("ZEROAMPS")
 
-    def calibrate_current(self, amps: float, target: int = 1) -> None:
+    def calibrate_current(self, amps: float) -> None:
         if not 0 < amps <= 100:
             raise ValueError("amps must be > 0 and <= 100")
-        self.send(f"CALAMPS {amps:.6f}", target)
+        self.send(f"CALAMPS {amps:.6f}")
 
-    def zero_voltage(self, target: int = 1) -> None:
-        self.send("ZEROVOLTS", target)
+    def zero_voltage(self) -> None:
+        self.send("ZEROVOLTS")
 
-    def calibrate_voltage(self, volts: float, target: int = 1) -> None:
+    def calibrate_voltage(self, volts: float) -> None:
         if not 0 < volts <= 60:
             raise ValueError("volts must be > 0 and <= 60")
-        self.send(f"CALVOLTS {volts:.6f}", target)
+        self.send(f"CALVOLTS {volts:.6f}")
 
-    def power_info(self, target: int = 1) -> None:
-        self.send("POWERINFO", target)
+    def power_info(self) -> None:
+        self.send("POWERINFO")
 
-    def reset_power_calibration(self, target: int = 1) -> None:
-        self.send("RESETPOWER", target)
+    def reset_power_calibration(self) -> None:
+        self.send("RESETPOWER")
 
     def start_recording(self) -> None:
         self.poll()
