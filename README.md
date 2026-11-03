@@ -61,7 +61,7 @@ Use the signal names/markings on the MAUCH cable or board; do not assume a wire 
 
 Install the PL-100 only in the battery's **positive** main lead, in series between the battery and ESC, following the arrow/current direction on the board. The battery negative lead does not pass through the sensor. Work with the battery disconnected, insulate every high-current joint, use connectors and wire rated for the expected current, and put a suitable fuse/current-limiting device in the test setup. Never alter high-current wiring while the battery is connected.
 
-The supplied code assumes the voltage-range solder bridge is **closed** and therefore uses `MAUCH_VOLTAGE_DIVIDER = 10.0`. If the bridge is open for a pack above 33 V, replace that constant with the divider written on your board's final-test result before testing. Fine calibration is performed from the separate dashboard setup window and saved on the ESP32.
+The supplied code assumes the voltage-range solder bridge is **closed** and therefore uses `MAUCH_VOLTAGE_DIVIDER = 10.0`. If the bridge is open for a pack above 33 V, replace that constant with the divider written on your board's final-test result before testing. Fine calibration is performed with the VS Code interactive command cells and saved on the ESP32.
 
 ## 1. Upload the ESP32 firmware
 
@@ -88,7 +88,7 @@ Before flashing, replace the public `CHANGE_ME_BEFORE_FLASHING` placeholder in
 `WIFI_PASSWORD` near the top of the sketch with a private password containing at
 least eight characters. Use the same SSID and password on both ESP32 boards.
 
-## 2. Install and run the PC logger
+## 2. Install and run the VS Code logger
 
 In PowerShell, from this project folder:
 
@@ -96,95 +96,94 @@ In PowerShell, from this project folder:
 .\run_logger.ps1
 ```
 
-The first run creates a Python virtual environment and installs `pyserial` and `matplotlib`. If your ESP32 later appears on another port:
+The first run creates `.venv`, installs the logger and Jupyter dependencies,
+registers a **Python (UCI Thrust Stand)** kernel, and opens
+`logger/vscode_live_plot.py` in VS Code when the `code` launcher is available.
+Install the recommended Microsoft Python and Jupyter extensions when VS Code
+offers them. To prepare the environment without opening VS Code:
 
 ```powershell
-.\run_logger.ps1 -Port COM8
+.\run_logger.ps1 -InstallOnly
 ```
 
-Alternatively, install the requirements and launch the Python file directly:
+Open `logger/vscode_live_plot.py`, select the project kernel, and run cells with
+**Shift+Enter**. Set `CONNECTION` to `"serial"`, `"wifi"`, or `"offline"`
+and edit `SERIAL_PORT` or `WIFI_HOST` before running the setup cell. Each
+figure is an inline Jupyter output; use the plot toolbar or double-click the
+output to inspect it in VS Code's built-in Plot Viewer. No standalone plotting
+window is created.
+
+Alternatively, prepare the environment manually:
 
 ```powershell
 python -m pip install -r .\logger\requirements.txt
-python .\logger\realtime_logger.py --port COM7
+python -m ipykernel install --user --name uci-thrust-stand --display-name "Python (UCI Thrust Stand)"
 ```
 
-CSV files are written into `logs` with timestamps. Closing the graph flushes and closes the file cleanly.
+CSV files are written into `logs` with timestamps as soon as the setup cell
+runs. Acquisition and CSV writing occur on background threads at full rate;
+plot refresh frequency does not discard saved samples. Always run the final
+`session.close()` cell before disconnecting hardware or closing VS Code so the
+CSV is flushed cleanly.
 
 ### Run wirelessly
 
 1. Power ESP 1 first, then ESP 2 if used. Each can use a USB power bank or another stable 5 V USB supply.
 2. On the plotting computer, connect to **ThrustStand** using the private password you configured in `WIFI_PASSWORD`. Windows may report “No internet”; remain connected because this is a private instrument network.
-3. Start the wireless logger:
+3. In the setup cell, set `CONNECTION = "wifi"` and run it. ESP 1 defaults
+   to `192.168.4.1:3333`.
+4. To add ESP 2, run the optional second-ESP cell, which connects to
+   `192.168.4.2:3333`.
 
-```powershell
-.\run_logger.ps1 -Wifi
-```
-
-Or launch it directly:
-
-```powershell
-python .\logger\realtime_logger.py --wifi
-```
-
-The logger initially connects to ESP 1. The dashboard is split vertically: load-cell and total-thrust plots are on the left; battery voltage, current, and electrical power are on the right. The main window contains only **Calibration & setup**, **Clear plot**, and recording controls so the graphs have more room.
-
-The dashboard renders at 5 frames per second by default and limits each visible line to 450 points. Sensor acquisition and CSV recording remain at full rate. This keeps the six-plot dashboard responsive on laptops and high-resolution displays. If needed, reduce rendering load further without losing saved data:
-
-```powershell
-.\run_logger.ps1 -Wifi -RefreshMs 300 -MaxPlotPoints 300
-```
-
-To open the dashboard without a connected COM device, use:
-
-```powershell
-.\run_logger.ps1 -Offline
-```
-
-The dashboard also falls back to offline mode instead of closing when its initial USB or Wi-Fi connection fails. Open **Calibration & setup**, enter an ESP Wi-Fi address, and click **Connect ESP** to attach a board later.
-
-Click **Calibration & setup** to open a separate window. That window contains ESP targeting, **+ Add ESP**, all load-cell calibration controls, and all MAUCH electrical calibration controls. To add ESP 2, leave **Add host** set to `192.168.4.2` and click **+ Add ESP**. Use **Target ESP** to choose which board receives commands. Recording and PNG export preserve the split graph layout.
-
-The plotter supports one or two ESPs. With only ESP 1 connected, all six visible plots use an equal three-row layout. Adding ESP 2 automatically changes to an equal-height five-row layout for its four load cells plus total thrust; the three equal-size electrical plots are distributed down the right side. Each ESP still accepts only one network logger connection, and USB serial remains available for diagnostics.
+The interactive workflow supports one or two ESPs. Load-cell and combined
+thrust plots are on the left; battery voltage, current, and electrical power
+are on the right. Run the live-plot cell for a bounded refresh interval and
+re-run it whenever another interval is wanted. Hardware acquisition continues
+between plot cells. Each ESP still accepts only one network logger connection,
+and USB serial remains available for diagnostics.
 
 ### Record and save a complete plot image
 
-1. Click **Start recording** immediately before a test. This clears the previous image capture and begins recording every plotted sample.
-2. Run the test for as long as needed. The live graph can continue scrolling normally.
-3. Click **Stop & save plot**. A timestamped `thrust_plot_YYYYmmdd_HHMMSS.png` containing the entire recorded thrust and electrical interval is saved in the `logs` folder beside the CSV—not only the last visible plot window.
+1. Run the `session.start_recording()` cell immediately before a test. This
+   clears only the previous PNG interval; CSV recording remains continuous.
+2. Run the test for as long as needed. The inline live-plot cell can be run
+   during the interval or omitted without affecting acquisition.
+3. Run the `save_recorded_plot(session)` cell. A timestamped
+   `thrust_plot_YYYYmmdd_HHMMSS.png` containing the entire marked thrust and
+   electrical interval is saved beside the CSV, not only the visible window.
 
 ## 3. Tare and calibrate
 
 Each connected load cell must be calibrated independently before it can contribute accurate thrust data.
 
 1. Leave the motor and all mounting hardware installed. Turn the motor off and make sure nothing is pushing or pulling on the rig.
-2. Select the board in **Target ESP**, click **Zero target ESP**, and keep its complete rig still. This zeros every responding cell on that ESP and skips a disconnected cell.
-3. Apply a precisely known force directly over cell 1 so the calibration load is carried by that sensor. Enter the force in pounds-force and click **Calibrate cell 1**.
-4. Move the same known force directly over cell 2 and click **Calibrate cell 2**.
-5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, click **Invert target** once; every calibrated cell on that ESP is reversed.
+2. Run `session.tare(target=1)` and keep its complete rig still. This zeros every responding cell on that ESP and skips a disconnected cell.
+3. Apply a precisely known force directly over cell 1 so the calibration load is carried by that sensor, then run `session.calibrate_cell(1, force_lbf, target=1)`.
+4. Move the same known force directly over cell 2 and run `session.calibrate_cell(2, force_lbf, target=1)`.
+5. Remove the force. The total should return close to zero. If applied thrust is displayed negative, run `session.invert(target=1)` once; every calibrated cell on that ESP is reversed.
 6. If a second ESP is connected, select target `2` and repeat the calibration for its two sensors.
 
-The ESP32 stores separate zero and calibration values for both sensors in nonvolatile memory. Before later tests, leave the complete rig installed and click **Zero assembled rig** after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
+The ESP32 stores separate zero and calibration values for both sensors in nonvolatile memory. Before later tests, leave the complete rig installed and run the tare command after warm-up. Recalibrate a sensor when its mounting, wiring, excitation, or load cell changes.
 
 ## 4. Calibrate the MAUCH PL-100
 
 Electrical calibration is enabled on ESP 1. Remove the propeller and mechanically disable the motor before calibration. Use a properly rated DC clamp meter for current; never put an ordinary handheld multimeter current input in series with propulsion wiring.
 
-1. Open **Calibration & setup** and set **Target ESP** to `1`.
-2. With the MAUCH electronics powered but no propulsion current flowing, click **Zero current**.
-3. Disconnect the propulsion battery while leaving the sensor electronics powered, then click **Zero voltage**.
-4. Reconnect the battery. Measure its voltage with a DVM, enter that value under **Reference volts**, and click **Calibrate voltage**.
-5. Run a safe, steady load well below the sensor and wiring limits. Enter the simultaneous DC clamp-meter reading under **Reference amps**, then click **Calibrate current**.
-6. Stop the load and verify that current returns near zero and displayed voltage agrees with the DVM. **Read calibration info** prints the saved offsets and slopes. **Reset electrical calibration** restores factory approximations.
+1. Use target `1` for the MAUCH sensor.
+2. With the MAUCH electronics powered but no propulsion current flowing, run `session.zero_current(target=1)`.
+3. Disconnect the propulsion battery while leaving the sensor electronics powered, then run `session.zero_voltage(target=1)`.
+4. Reconnect the battery. Measure its voltage with a DVM and run `session.calibrate_voltage(reference_volts, target=1)`.
+5. Run a safe, steady load well below the sensor and wiring limits, measure it simultaneously with a DC clamp meter, and run `session.calibrate_current(reference_amps, target=1)`.
+6. Stop the load and verify that current returns near zero and displayed voltage agrees with the DVM. `session.power_info(target=1)` reports saved offsets and slopes; `session.reset_power_calibration(target=1)` restores factory approximations.
 
-Current and voltage use independent two-point fits: the zero buttons save ADC offsets, while the calibration buttons calculate units per ADC count from the entered reference. The values survive power cycles. Calibrate near the middle or upper-middle of the range you normally use, without approaching the 100 A PL-100 limit.
+Current and voltage use independent two-point fits: the zero commands save ADC offsets, while the calibration commands calculate units per ADC count from the entered reference. The values survive power cycles. Calibrate near the middle or upper-middle of the range you normally use, without approaching the 100 A PL-100 limit.
 
-The original ESP32 ADC becomes unreliable at the ends of its range. The dashboard warns when either electrical channel approaches saturation. If the warning appears, calibration cannot recover the clipped peak; reduce the signal with a suitable divider or use a 3.3 V-compatible external ADC before continuing.
+The original ESP32 ADC becomes unreliable at the ends of its range. The session status warns when either electrical channel approaches saturation. If the warning appears, calibration cannot recover the clipped peak; reduce the signal with a suitable divider or use a 3.3 V-compatible external ADC before continuing.
 
 ## Measurement notes
 
 - Each ESP has a separate plot for load cell 1 and load cell 2. The bottom plot sums every fresh, calibrated load cell across the connected ESPs. Faint lines are raw data and solid lines are filtered data.
-- Every live plot shows its maximum filtered value since **Clear plot**: pounds-force for each calibrated load cell and total thrust, volts, amps, and watts. Saved PNGs calculate and display the corresponding maxima for the complete recorded interval.
+- Every generated plot shows the maximum filtered value in its displayed interval: pounds-force for each calibrated load cell and total thrust, volts, amps, and watts. Saved PNGs calculate the corresponding maxima for the complete marked interval.
 - A missing, unpowered, or uncalibrated load cell is reported as `NaN`, bypassed automatically, and excluded from the combined total. The other load cell continues sampling normally.
 - If a cell is responding but has no calibration, its individual panel switches to **ADC counts (uncalibrated)** so wiring and sensor activity remain visible. ADC counts never contribute to the pounds-force total.
 - Upgrading from the original single-cell firmware automatically migrates its saved `zero` and `scale` values to load cell 1.
