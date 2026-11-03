@@ -49,6 +49,37 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(power["filtered_power_w"], 10.71)
 
 
+class FirmwareWebDashboardTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.firmware = (
+            Path(__file__).resolve().parents[1] /
+            "firmware" / "thrust_stand_esp32" / "thrust_stand_esp32.ino"
+        ).read_text(encoding="utf-8")
+
+    def test_dashboard_and_json_routes_are_present(self):
+        self.assertIn("WiFiServer webServer(80);", self.firmware)
+        self.assertIn('webRequest.startsWith("GET /data ")', self.firmware)
+        self.assertIn('webRequest.startsWith("GET /events ")', self.firmware)
+        self.assertIn('webRequest.startsWith("GET / ")', self.firmware)
+        self.assertIn('new EventSource("/events")', self.firmware)
+        self.assertNotIn('fetch("/data"', self.firmware)
+        self.assertNotIn("setInterval(update,250)", self.firmware)
+
+    def test_dashboard_preserves_four_cell_contract(self):
+        self.assertIn("constexpr uint8_t CELL_COUNT = 4;", self.firmware)
+        for cell_number in range(1, 5):
+            self.assertIn(f'Load cell {cell_number}', self.firmware)
+
+    def test_dashboard_contains_self_hosted_history_plots(self):
+        for canvas_id in (
+                "thrustChart", "voltageChart", "currentChart", "powerChart"):
+            self.assertIn(f'id="{canvas_id}"', self.firmware)
+        self.assertIn("const historyLimit=120;", self.firmware)
+        self.assertIn(
+            'window.addEventListener("resize",drawCharts)', self.firmware)
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

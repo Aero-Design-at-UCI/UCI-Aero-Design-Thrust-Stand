@@ -41,7 +41,7 @@ constexpr uint16_t TCP_PORT = 3333;
 constexpr char WIFI_SSID[] = "ThrustStand";
 // Public-repository placeholder. Replace this locally with a private password
 // of at least eight characters before flashing either ESP32.
-constexpr char WIFI_PASSWORD[] = "CHANGE_ME_BEFORE_FLASHING";
+constexpr char WIFI_PASSWORD[] = "password";
 constexpr uint32_t HX_TIMEOUT_MS = 1500;
 constexpr size_t ZERO_SAMPLES = 20;
 constexpr size_t CAL_SAMPLES = 20;
@@ -84,16 +84,264 @@ LoadCell cells[CELL_COUNT] = {
 
 Preferences prefs;
 WiFiServer tcpServer(TCP_PORT);
+WiFiServer webServer(80);
 WiFiClient tcpClient;
+WiFiClient webClient;
+WiFiClient eventClient;
 String serialCommand;
 String wifiCommand;
+String webRequest;
+uint32_t webClientStartedMs = 0;
+uint32_t lastWebEventMs = 0;
+constexpr uint32_t WEB_EVENT_INTERVAL_MS = 250;
 uint32_t lastPowerSampleMs = 0;
 double filteredCurrentA = NAN;
 double filteredVoltageV = NAN;
+double latestFilteredPowerW = NAN;
+uint32_t latestCurrentRaw = 0;
+uint32_t latestVoltageRaw = 0;
+int32_t latestCellRaw[CELL_COUNT] = {0, 0, 0, 0};
+double latestFilteredCellLbf[CELL_COUNT] = {NAN, NAN, NAN, NAN};
+uint32_t latestCellSampleMs[CELL_COUNT] = {0, 0, 0, 0};
 uint32_t currentZeroRaw = 0;
 uint32_t voltageZeroRaw = 0;
 double currentAperCount = DEFAULT_CURRENT_A_PER_COUNT;
 double voltageVperCount = DEFAULT_VOLTAGE_V_PER_COUNT;
+
+const char WEB_PAGE[] PROGMEM = R"HTML(
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>UCI Thrust Stand</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07111f;--panel:#111d2e;--line:#26364d;
+      --text:#edf4ff;--muted:#91a4bd;--blue:#3b82f6;--green:#22c55e;
+      --amber:#f59e0b;--red:#ef4444}
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(145deg,#07111f,#0c1727 55%,#0b1421);
+      color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif;min-height:100vh}
+    main{width:min(1180px,94vw);margin:auto;padding:30px 0 44px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:20px;
+      margin-bottom:24px}
+    h1{font-size:clamp(24px,4vw,38px);margin:0;letter-spacing:-.03em}
+    .sub{color:var(--muted);margin-top:7px}
+    .status{display:flex;align-items:center;gap:8px;color:var(--muted);
+      background:#0c1727;border:1px solid var(--line);padding:9px 13px;border-radius:999px}
+    .dot{width:9px;height:9px;border-radius:50%;background:var(--amber);
+      box-shadow:0 0 12px currentColor}.dot.online{background:var(--green)}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+    .card{grid-column:span 3;background:linear-gradient(180deg,#142238,#101b2c);
+      border:1px solid var(--line);border-radius:17px;padding:20px;
+      box-shadow:0 12px 32px #0004}
+    .card.total{grid-column:span 6;border-color:#315f9d}
+    .card.electrical{grid-column:span 2}
+    .label{color:var(--muted);font-size:13px;text-transform:uppercase;
+      letter-spacing:.11em;font-weight:700}
+    .value{font-size:clamp(29px,4vw,45px);font-variant-numeric:tabular-nums;
+      font-weight:750;margin:12px 0 8px;white-space:nowrap}
+    .unit{font-size:.46em;color:var(--muted);margin-left:5px}
+    .detail{font-size:13px;color:var(--muted);min-height:18px}
+    .warning{color:var(--amber)}
+    .plots{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+    .plot-card{background:linear-gradient(180deg,#142238,#101b2c);
+      border:1px solid var(--line);border-radius:17px;padding:18px;
+      box-shadow:0 12px 32px #0004;min-width:0}
+    .plot-card.thrust{grid-column:1/-1}
+    .plot-title{display:flex;align-items:center;justify-content:space-between;
+      gap:12px;margin-bottom:12px}
+    .plot-title h2{font-size:15px;margin:0}.plot-title span{color:var(--muted);font-size:12px}
+    canvas{display:block;width:100%;height:220px}
+    .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;
+      color:var(--muted);font-size:12px}
+    .key{display:inline-flex;align-items:center;gap:5px}
+    .swatch{width:9px;height:9px;border-radius:50%;display:inline-block}
+    footer{color:var(--muted);font-size:12px;margin-top:20px;text-align:center}
+    @media(max-width:800px){.card{grid-column:span 6}.card.total{grid-column:span 12}
+      .card.electrical{grid-column:span 4}.plots{grid-template-columns:1fr}}
+    @media(max-width:520px){header{align-items:flex-start;flex-direction:column}
+      .card,.card.total,.card.electrical{grid-column:span 12}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>UCI Aero Design Thrust Stand</h1>
+      <div class="sub">Four load cells + MAUCH PL-100</div></div>
+    <div class="status"><span id="dot" class="dot"></span><span id="status">Connecting</span></div>
+  </header>
+  <section class="grid">
+    <article class="card"><div class="label">Load cell 1</div>
+      <div id="cell1" class="value">--</div><div id="cell1d" class="detail">Waiting for data</div></article>
+    <article class="card"><div class="label">Load cell 2</div>
+      <div id="cell2" class="value">--</div><div id="cell2d" class="detail">Waiting for data</div></article>
+    <article class="card"><div class="label">Load cell 3</div>
+      <div id="cell3" class="value">--</div><div id="cell3d" class="detail">Waiting for data</div></article>
+    <article class="card"><div class="label">Load cell 4</div>
+      <div id="cell4" class="value">--</div><div id="cell4d" class="detail">Waiting for data</div></article>
+    <article class="card total"><div class="label">Combined thrust</div>
+      <div id="total" class="value">--</div><div class="detail">Sum of fresh calibrated cells</div></article>
+    <article class="card electrical"><div class="label">Voltage</div>
+      <div id="voltage" class="value">--</div><div id="voltaged" class="detail">MAUCH</div></article>
+    <article class="card electrical"><div class="label">Current</div>
+      <div id="current" class="value">--</div><div id="currentd" class="detail">MAUCH</div></article>
+    <article class="card electrical"><div class="label">Power</div>
+      <div id="power" class="value">--</div><div class="detail">Voltage × current</div></article>
+  </section>
+  <section class="plots">
+    <article class="plot-card thrust">
+      <div class="plot-title"><h2>Thrust history</h2><span>Last 30 seconds</span></div>
+      <canvas id="thrustChart"></canvas>
+      <div class="legend">
+        <span class="key"><i class="swatch" style="background:#60a5fa"></i>Cell 1</span>
+        <span class="key"><i class="swatch" style="background:#fb923c"></i>Cell 2</span>
+        <span class="key"><i class="swatch" style="background:#4ade80"></i>Cell 3</span>
+        <span class="key"><i class="swatch" style="background:#f87171"></i>Cell 4</span>
+        <span class="key"><i class="swatch" style="background:#f8fafc"></i>Total</span>
+      </div>
+    </article>
+    <article class="plot-card">
+      <div class="plot-title"><h2>Voltage</h2><span>V</span></div>
+      <canvas id="voltageChart"></canvas>
+    </article>
+    <article class="plot-card">
+      <div class="plot-title"><h2>Current</h2><span>A</span></div>
+      <canvas id="currentChart"></canvas>
+    </article>
+    <article class="plot-card">
+      <div class="plot-title"><h2>Electrical power</h2><span>W</span></div>
+      <canvas id="powerChart"></canvas>
+    </article>
+  </section>
+  <footer>Display only. Use the VS Code workflow for calibration and CSV recording.</footer>
+</main>
+<script>
+  const byId=id=>document.getElementById(id);
+  const number=(value,digits,unit)=>value===null?"--":
+    Number(value).toFixed(digits)+"<span class='unit'>"+unit+"</span>";
+  const history={
+    cell1:[],cell2:[],cell3:[],cell4:[],total:[],
+    voltage:[],current:[],power:[]
+  };
+  const historyLimit=120;
+  const pushHistory=(name,value)=>{
+    history[name].push(value===null?null:Number(value));
+    if(history[name].length>historyLimit)history[name].shift();
+  };
+  function drawChart(canvasId,series,unit){
+    const canvas=byId(canvasId);
+    const width=Math.max(260,canvas.clientWidth);
+    const height=220;
+    const ratio=window.devicePixelRatio||1;
+    canvas.width=Math.floor(width*ratio);
+    canvas.height=Math.floor(height*ratio);
+    const context=canvas.getContext("2d");
+    context.setTransform(ratio,0,0,ratio,0,0);
+    context.clearRect(0,0,width,height);
+    const pad={left:48,right:12,top:12,bottom:26};
+    const plotWidth=width-pad.left-pad.right;
+    const plotHeight=height-pad.top-pad.bottom;
+    const values=[];
+    series.forEach(item=>item.values.forEach(value=>{
+      if(value!==null&&Number.isFinite(value))values.push(value);
+    }));
+    let minimum=values.length?Math.min(...values):0;
+    let maximum=values.length?Math.max(...values):1;
+    if(minimum>0)minimum=0;
+    if(maximum<0)maximum=0;
+    if(maximum-minimum<0.001){maximum+=0.5;minimum-=0.5}
+    const margin=(maximum-minimum)*0.08;
+    maximum+=margin;minimum-=margin;
+    context.font="11px Segoe UI,Arial";
+    context.strokeStyle="#26364d";context.fillStyle="#91a4bd";context.lineWidth=1;
+    for(let row=0;row<=4;row++){
+      const y=pad.top+plotHeight*row/4;
+      context.beginPath();context.moveTo(pad.left,y);context.lineTo(width-pad.right,y);
+      context.stroke();
+      const tick=maximum-(maximum-minimum)*row/4;
+      context.fillText(tick.toFixed(Math.abs(tick)<10?2:1),4,y+4);
+    }
+    context.fillText("-30 s",pad.left,height-6);
+    context.fillText("now",width-pad.right-22,height-6);
+    context.fillText(unit,4,11);
+    series.forEach(item=>{
+      context.strokeStyle=item.color;context.lineWidth=item.width||2;
+      context.beginPath();let drawing=false;
+      const historyOffset=Math.max(0,historyLimit-item.values.length);
+      item.values.forEach((value,index)=>{
+        if(value===null||!Number.isFinite(value)){drawing=false;return}
+        const x=pad.left+plotWidth*((historyOffset+index)/Math.max(1,historyLimit-1));
+        const y=pad.top+plotHeight*(maximum-value)/(maximum-minimum);
+        if(!drawing){context.moveTo(x,y);drawing=true}else context.lineTo(x,y);
+      });
+      context.stroke();
+    });
+  }
+  function drawCharts(){
+    drawChart("thrustChart",[
+      {values:history.cell1,color:"#60a5fa"},
+      {values:history.cell2,color:"#fb923c"},
+      {values:history.cell3,color:"#4ade80"},
+      {values:history.cell4,color:"#f87171"},
+      {values:history.total,color:"#f8fafc",width:3}
+    ],"lbf");
+    drawChart("voltageChart",[{values:history.voltage,color:"#60a5fa"}],"V");
+    drawChart("currentChart",[{values:history.current,color:"#fb923c"}],"A");
+    drawChart("powerChart",[{values:history.power,color:"#4ade80"}],"W");
+  }
+  function applyData(data){
+    try{
+      data.cells.forEach((cell,index)=>{
+        const value=byId("cell"+(index+1));
+        const detail=byId("cell"+(index+1)+"d");
+        if(!cell.available){
+          value.innerHTML="--";detail.textContent="Not connected";detail.className="detail warning";
+        }else if(!cell.calibrated){
+          value.innerHTML="--";detail.textContent="Uncalibrated · raw "+cell.raw;
+          detail.className="detail warning";
+        }else{
+          value.innerHTML=number(cell.lbf,3,"lbf");detail.textContent="Raw ADC "+cell.raw;
+          detail.className="detail";
+        }
+      });
+      byId("total").innerHTML=number(data.total_lbf,3,"lbf");
+      byId("voltage").innerHTML=number(data.voltage_v,3,"V");
+      byId("current").innerHTML=number(data.current_a,3,"A");
+      byId("power").innerHTML=number(data.power_w,2,"W");
+      const saturated=data.current_raw>=4000||data.voltage_raw>=4000;
+      byId("voltaged").textContent=saturated?"ADC near saturation":"MAUCH";
+      byId("currentd").textContent=saturated?"Check signal level":"MAUCH";
+      byId("voltaged").className=saturated?"detail warning":"detail";
+      byId("currentd").className=saturated?"detail warning":"detail";
+      data.cells.forEach((cell,index)=>
+        pushHistory("cell"+(index+1),cell.available&&cell.calibrated?cell.lbf:null));
+      pushHistory("total",data.total_lbf);
+      pushHistory("voltage",data.voltage_v);
+      pushHistory("current",data.current_a);
+      pushHistory("power",data.power_w);
+      drawCharts();
+      byId("dot").className="dot online";byId("status").textContent="Live";
+    }catch(error){
+      byId("dot").className="dot";byId("status").textContent="Data error";
+    }
+  }
+  const eventStream=new EventSource("/events");
+  eventStream.onopen=()=>{
+    byId("dot").className="dot online";byId("status").textContent="Live";
+  };
+  eventStream.onmessage=event=>{
+    try{applyData(JSON.parse(event.data));}
+    catch(error){byId("dot").className="dot";byId("status").textContent="Data error";}
+  };
+  eventStream.onerror=()=>{
+    byId("dot").className="dot";byId("status").textContent="Reconnecting";
+  };
+  window.addEventListener("resize",drawCharts);
+</script>
+</body>
+</html>
+)HTML";
 
 IPAddress networkIp() {
   return WiFi.softAPIP();
@@ -257,6 +505,9 @@ void sampleElectricalPower() {
 
   const double powerW = voltageV * currentA;
   const double filteredPowerW = filteredVoltageV * filteredCurrentA;
+  latestCurrentRaw = currentRaw;
+  latestVoltageRaw = voltageRaw;
+  latestFilteredPowerW = filteredPowerW;
   emitf("POWER,%lu,%lu,%lu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f",
         now, currentRaw, voltageRaw, currentA, voltageV, powerW,
         filteredCurrentA, filteredVoltageV, filteredPowerW);
@@ -419,6 +670,143 @@ void serviceWifiClient() {
   if (tcpClient && tcpClient.connected()) readCommands(tcpClient, wifiCommand);
 }
 
+void printJsonNumber(WiFiClient &client, double value, uint8_t decimals) {
+  if (isfinite(value)) client.print(value, decimals);
+  else client.print("null");
+}
+
+void sendWebDashboard() {
+  webClient.println("HTTP/1.1 200 OK");
+  webClient.println("Content-Type: text/html; charset=utf-8");
+  webClient.println("Cache-Control: no-store");
+  webClient.println("Connection: close");
+  webClient.println();
+  webClient.print(WEB_PAGE);
+}
+
+void writeWebJson(WiFiClient &client) {
+  const uint32_t now = millis();
+  client.print("{\"time_ms\":");
+  client.print(now);
+  client.print(",\"cells\":[");
+  double dashboardTotalLbf = 0.0;
+  uint8_t dashboardCellCount = 0;
+  for (uint8_t i = 0; i < CELL_COUNT; ++i) {
+    if (i) client.print(',');
+    const bool available =
+        latestCellSampleMs[i] && now - latestCellSampleMs[i] <= 2000;
+    if (available && isfinite(latestFilteredCellLbf[i])) {
+      dashboardTotalLbf += latestFilteredCellLbf[i];
+      ++dashboardCellCount;
+    }
+    client.print("{\"available\":");
+    client.print(available ? "true" : "false");
+    client.print(",\"calibrated\":");
+    client.print(isfinite(cells[i].countsPerKg) ? "true" : "false");
+    client.print(",\"raw\":");
+    client.print(latestCellRaw[i]);
+    client.print(",\"lbf\":");
+    printJsonNumber(client, latestFilteredCellLbf[i], 5);
+    client.print('}');
+  }
+  client.print("],\"total_lbf\":");
+  printJsonNumber(client, dashboardCellCount ? dashboardTotalLbf : NAN, 5);
+  client.print(",\"current_raw\":");
+  client.print(latestCurrentRaw);
+  client.print(",\"voltage_raw\":");
+  client.print(latestVoltageRaw);
+  client.print(",\"current_a\":");
+  printJsonNumber(client, filteredCurrentA, 5);
+  client.print(",\"voltage_v\":");
+  printJsonNumber(client, filteredVoltageV, 5);
+  client.print(",\"power_w\":");
+  printJsonNumber(client, latestFilteredPowerW, 5);
+  client.print('}');
+}
+
+void sendWebData() {
+  webClient.println("HTTP/1.1 200 OK");
+  webClient.println("Content-Type: application/json");
+  webClient.println("Cache-Control: no-store");
+  webClient.println("Connection: close");
+  webClient.println();
+  writeWebJson(webClient);
+}
+
+void startWebEvents() {
+  if (eventClient) eventClient.stop();
+  eventClient = webClient;
+  eventClient.setNoDelay(true);
+  eventClient.println("HTTP/1.1 200 OK");
+  eventClient.println("Content-Type: text/event-stream");
+  eventClient.println("Cache-Control: no-cache");
+  eventClient.println("Connection: keep-alive");
+  eventClient.println();
+  eventClient.println("retry: 2000");
+  eventClient.println();
+  webClient = WiFiClient();
+  webRequest = "";
+  lastWebEventMs = 0;
+}
+
+void serviceWebEvents() {
+  if (!eventClient || !eventClient.connected()) {
+    if (eventClient) eventClient.stop();
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - lastWebEventMs < WEB_EVENT_INTERVAL_MS) return;
+  lastWebEventMs = now;
+  eventClient.print("data: ");
+  writeWebJson(eventClient);
+  eventClient.print("\n\n");
+}
+
+void sendWebNotFound() {
+  webClient.println("HTTP/1.1 404 Not Found");
+  webClient.println("Content-Type: text/plain; charset=utf-8");
+  webClient.println("Connection: close");
+  webClient.println();
+  webClient.println("Not found");
+}
+
+void serviceWebClient() {
+  if (webClient && !webClient.connected()) {
+    webClient.stop();
+    webRequest = "";
+  }
+  if (!webClient) {
+    WiFiClient candidate = webServer.available();
+    if (candidate) {
+      webClient = candidate;
+      webRequest = "";
+      webClientStartedMs = millis();
+    }
+  }
+  if (!webClient) return;
+
+  while (webClient.available()) {
+    const char c = static_cast<char>(webClient.read());
+    if (c == '\n') {
+      if (webRequest.startsWith("GET /events ")) {
+        startWebEvents();
+        return;
+      }
+      if (webRequest.startsWith("GET /data ")) sendWebData();
+      else if (webRequest.startsWith("GET / ")) sendWebDashboard();
+      else sendWebNotFound();
+      webClient.stop();
+      webRequest = "";
+      return;
+    }
+    if (c != '\r' && webRequest.length() < 256) webRequest += c;
+  }
+  if (millis() - webClientStartedMs > 1000) {
+    webClient.stop();
+    webRequest = "";
+  }
+}
+
 void setup() {
   for (uint8_t i = 0; i < CELL_COUNT; ++i) {
     pinMode(cells[i].doutPin, INPUT_PULLUP);
@@ -442,8 +830,12 @@ void setup() {
   if (wifiReady) {
     tcpServer.begin();
     tcpServer.setNoDelay(true);
+    webServer.begin();
+    webServer.setNoDelay(true);
     Serial.printf("# STATUS,WiFi ready: %s:%u\n",
                   networkIp().toString().c_str(), TCP_PORT);
+    Serial.printf("# STATUS,Web dashboard: http://%s/\n",
+                  networkIp().toString().c_str());
   } else {
     Serial.println("# ERROR,Could not establish WiFi; USB serial still works");
   }
@@ -518,6 +910,8 @@ void setup() {
 void loop() {
   readCommands(Serial, serialCommand);
   serviceWifiClient();
+  serviceWebClient();
+  serviceWebEvents();
   sampleElectricalPower();
 
   int32_t raw[CELL_COUNT] = {0, 0, 0, 0};
@@ -528,6 +922,7 @@ void loop() {
     anyReceived |= received[i];
   }
   if (!anyReceived) return;
+  const uint32_t sampleNow = millis();
 
   double kgf[CELL_COUNT] = {NAN, NAN, NAN, NAN};
   double filteredKgf[CELL_COUNT] = {NAN, NAN, NAN, NAN};
@@ -535,12 +930,18 @@ void loop() {
   double filteredTotalKgf = 0.0;
   uint8_t validCells = 0;
   for (uint8_t i = 0; i < CELL_COUNT; ++i) {
-    if (!received[i] || !isfinite(cells[i].countsPerKg)) continue;
+    if (!received[i]) continue;
+    latestCellRaw[i] = raw[i];
+    latestCellSampleMs[i] = sampleNow;
+    latestFilteredCellLbf[i] = NAN;
+    if (!isfinite(cells[i].countsPerKg)) continue;
     kgf[i] = static_cast<double>(static_cast<int64_t>(raw[i]) - cells[i].zeroOffset) /
              cells[i].countsPerKg;
     if (!isfinite(cells[i].filteredKgf)) cells[i].filteredKgf = kgf[i];
     else cells[i].filteredKgf += EMA_ALPHA * (kgf[i] - cells[i].filteredKgf);
     filteredKgf[i] = cells[i].filteredKgf;
+    latestFilteredCellLbf[i] =
+        filteredKgf[i] * STANDARD_GRAVITY / NEWTONS_PER_LBF;
     totalKgf += kgf[i];
     filteredTotalKgf += filteredKgf[i];
     ++validCells;
@@ -550,7 +951,7 @@ void loop() {
   const double totalForceN = validCells ? totalKgf * STANDARD_GRAVITY : NAN;
   const double filteredTotalN = validCells ? filteredTotalKgf * STANDARD_GRAVITY : NAN;
   emitf("DATA,%lu,%ld,%ld,%ld,%ld,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-        millis(), raw[0], raw[1], raw[2], raw[3],
+        sampleNow, raw[0], raw[1], raw[2], raw[3],
         kgf[0], kgf[1], kgf[2], kgf[3], reportedTotalKgf,
         totalForceN, filteredTotalN);
 }

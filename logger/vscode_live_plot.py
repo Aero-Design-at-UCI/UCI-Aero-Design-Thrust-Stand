@@ -12,7 +12,7 @@ from realtime_logger import (
 from vscode_plotting import render_dashboard, save_recorded_plot, show_live
 
 # Edit these values before running this cell.
-CONNECTION = "offline"  # "serial", "wifi", or "offline"
+CONNECTION = "serial"  # "serial", "wifi", or "offline"
 SERIAL_PORT = "COM7"
 WIFI_HOST = DEFAULT_WIFI_HOST
 WINDOW_SECONDS = 30.0
@@ -90,3 +90,5 @@ render_dashboard(session, recorded=True)
 # %%
 session.close()
 print(f"Saved {session.rows_written} samples to {session.output}")
+
+# %%

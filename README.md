@@ -139,6 +139,21 @@ CSV is flushed cleanly.
 3. In the setup cell, set `CONNECTION = "wifi"` and run it. The ESP32 defaults
    to `192.168.4.1:3333`.
 
+### Open the ESP32 web dashboard
+
+After connecting the computer or phone to **ThrustStand**, open
+`http://192.168.4.1` in a browser. The ESP32 serves a responsive dashboard
+showing all four filtered load-cell readings, combined thrust, voltage,
+current, and electrical power. It includes a multi-line thrust plot plus
+separate voltage, current, and power plots covering the latest 30 seconds.
+The page receives four updates per second through one persistent connection,
+then reconnects automatically if the link drops. It marks missing or
+uncalibrated cells without blocking sensor acquisition.
+
+The browser page is display-only. Use the VS Code cells for tare, calibration,
+full-rate CSV recording, and saved plots. The web dashboard and the TCP logger
+can run at the same time.
+
 The interactive workflow uses one ESP32. Four load-cell plots and combined
 thrust plots are on the left; battery voltage, current, and electrical power
 are on the right. Run the live-plot cell for a bounded refresh interval and
